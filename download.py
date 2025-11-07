@@ -1,35 +1,40 @@
 #!/usr/bin/env python3
 """
-zoom_bulk_download.py
+Zoom Bulk Download Tool
+
+Download Zoom cloud recordings in bulk with resume support.
 
 Requirements:
-  pip install requests tqdm
+  pip install requests tqdm msgspec
 
 Environment variables (preferred):
   ZOOM_ACCOUNT_ID      # account id (for S2S OAuth)
   ZOOM_CLIENT_ID
   ZOOM_CLIENT_SECRET
-Optional:
-  ZOOM_USER_ID         # if you want user-level listing (email or 'me'), otherwise account-level used
+
 Usage:
-  python zoom_bulk_download.py --from 2025-01-01 --to 2025-10-09 --out ./downloads --concurrency 6
+  python download.py --from 2025-01-01 --to 2025-01-10 --out ./downloads
 """
-import os
-import sys
 import argparse
 import base64
 import json
 import pathlib
 import datetime
+from dataclasses import dataclass
+from typing import Optional
+
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-
 import msgspec
 
 
-# Define msgspec struct
+# ============================================================================
+# Data Models
+# ============================================================================
+
 class ZoomRecord(msgspec.Struct):
+    """Represents a single Zoom recording."""
     title: str
     topic: str
     date: str
@@ -42,197 +47,334 @@ class ZoomRecord(msgspec.Struct):
         return isinstance(other, ZoomRecord) and self.download_url == other.download_url
 
 
-API_BASE = "https://api.zoom.us/v2"
-OAUTH_TOKEN_URL = "https://zoom.us/oauth/token"
+@dataclass
+class DownloadResult:
+    """Result of a download attempt."""
+    status: str  # ok, skipped, error, exception, no_url
+    title: str
+    path: Optional[str] = None
+    error: Optional[str] = None
+    timestamp: str = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.datetime.now(datetime.UTC).isoformat()
+
+    def to_dict(self):
+        return {k: v for k, v in self.__dict__.items() if v is not None}
 
 
-def get_s2s_token(account_id, client_id, client_secret):
-    auth = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-    params = {"grant_type": "account_credentials", "account_id": account_id}
-    headers = {"Authorization": f"Basic {auth}"}
-    r = requests.post(OAUTH_TOKEN_URL, params=params, headers=headers, timeout=30)
-    r.raise_for_status()
-    return r.json()["access_token"]
+@dataclass
+class DownloadReport:
+    """Tracks download history across multiple runs."""
+    results: list[dict]
+
+    @classmethod
+    def load(cls, report_path: pathlib.Path) -> "DownloadReport":
+        """Load existing report or create new one."""
+        if report_path.exists():
+            try:
+                with open(report_path, "r", encoding="utf8") as fh:
+                    data = json.load(fh)
+                    return cls(results=data.get("results", []))
+            except Exception as e:
+                print(f"Warning: Could not load report: {e}")
+        return cls(results=[])
+
+    def save(self, report_path: pathlib.Path):
+        """Save report to disk."""
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(report_path, "w", encoding="utf8") as fh:
+            json.dump({"results": self.results}, fh, indent=2, ensure_ascii=False)
+
+    def add_result(self, result: DownloadResult):
+        """Add a download result to the report."""
+        self.results.append(result.to_dict())
+
+    def get_successful_titles(self) -> set[str]:
+        """Get set of all successfully downloaded titles."""
+        return {
+            r["title"] for r in self.results
+            if r.get("status") in ("ok", "skipped")
+        }
+
+    def get_stats(self, recent_results: list[DownloadResult]) -> dict:
+        """Calculate download statistics."""
+        return {
+            "success": sum(1 for r in recent_results if r.status == "ok"),
+            "skipped": sum(1 for r in recent_results if r.status == "skipped"),
+            "errors": sum(1 for r in recent_results if r.status in ("error", "exception", "no_url")),
+            "total_in_report": len(self.results)
+        }
 
 
-def list_account_recordings(access_token, account_id, start, end):
-    url = f"{API_BASE}/accounts/{account_id}/recordings"
-    return _paginate_recordings(url, access_token, start, end)
+# ============================================================================
+# Zoom API Client
+# ============================================================================
 
+class ZoomClient:
+    """Client for interacting with Zoom API."""
 
-def list_user_recordings(access_token, user_id, start, end):
-    url = f"{API_BASE}/users/{user_id}/recordings"
-    return _paginate_recordings(url, access_token, start, end)
+    API_BASE = "https://api.zoom.us/v2"
+    OAUTH_TOKEN_URL = "https://zoom.us/oauth/token"
 
+    def __init__(self, account_id: str, client_id: str, client_secret: str):
+        self.account_id = account_id
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._token = None
 
-def _paginate_recordings(url, access_token, start, end) -> set[ZoomRecord]:
-    recordings = set()
-    params = {"from": start, "to": end, "page_size": 300}
-    headers = {"Authorization": f"Bearer {access_token}"}
-    next_token = ""
-    while True:
-        if next_token:
-            params["next_page_token"] = next_token
-        r = requests.get(url, params=params, headers=headers, timeout=30)
+    def get_token(self) -> str:
+        """Get S2S OAuth token."""
+        if self._token:
+            return self._token
+
+        auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+        params = {"grant_type": "account_credentials", "account_id": self.account_id}
+        headers = {"Authorization": f"Basic {auth}"}
+
+        r = requests.post(self.OAUTH_TOKEN_URL, params=params, headers=headers, timeout=30)
         r.raise_for_status()
-        j = r.json()
-        # different endpoints may return 'meetings' or 'recordings' objects; try both
-        for meeting in j["meetings"]:
-            topic = meeting.get("topic", "").strip()
-            start_time = meeting.get("start_time")
-            date = datetime.datetime.fromisoformat(start_time.replace("Z", "+00:00")).date().isoformat()
-            title = f"{topic} - {date}"
-            for f in meeting.get("recording_files", []):
-                if f.get("file_extension") == "MP4":
-                    recordings.add(
-                        ZoomRecord(
+
+        self._token = r.json()["access_token"]
+        return self._token
+
+    def list_recordings(self, start_date: str, end_date: str, user_id: Optional[str] = None) -> set[ZoomRecord]:
+        """List all recordings in date range."""
+        if user_id:
+            url = f"{self.API_BASE}/users/{user_id}/recordings"
+        else:
+            url = f"{self.API_BASE}/accounts/{self.account_id}/recordings"
+
+        return self._paginate_recordings(url, start_date, end_date)
+
+    def _paginate_recordings(self, url: str, start_date: str, end_date: str) -> set[ZoomRecord]:
+        """Paginate through all recordings."""
+        recordings = set()
+        params = {"from": start_date, "to": end_date, "page_size": 300}
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        next_token = ""
+
+        while True:
+            if next_token:
+                params["next_page_token"] = next_token
+
+            r = requests.get(url, params=params, headers=headers, timeout=30)
+            r.raise_for_status()
+            j = r.json()
+
+            for meeting in j.get("meetings", []):
+                topic = meeting.get("topic", "").strip()
+                start_time = meeting.get("start_time")
+                date = datetime.datetime.fromisoformat(start_time.replace("Z", "+00:00")).date().isoformat()
+                title = f"{topic} - {date}"
+
+                for f in meeting.get("recording_files", []):
+                    if f.get("file_extension") == "MP4":
+                        recordings.add(ZoomRecord(
                             title=title,
                             topic=topic,
                             date=date,
                             download_url=f["download_url"]
-                        )
-                    )
-        next_token = j.get("next_page_token") or ""
-        if not next_token:
-            break
-    # dedupe by file id if appears multiple times
-    return recordings
+                        ))
+
+            next_token = j.get("next_page_token") or ""
+            if not next_token:
+                break
+
+        return recordings
 
 
-def safe_filename(s):
-    keep = "-_.() abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    return "".join(c if c in keep else "_" for c in s)[:200].strip()
+# ============================================================================
+# Download Manager
+# ============================================================================
 
+class DownloadManager:
+    """Manages concurrent downloads with progress tracking."""
 
-def download_one(rec: ZoomRecord, access_token, out_dir, session=None):
-    """Download a single Zoom recording. Returns result dict with status."""
-    session = session or requests.Session()
-    download_url = rec.download_url
-    if not download_url:
-        return {"status": "no_url", "title": rec.title}
+    def __init__(self, token: str, out_dir: pathlib.Path, concurrency: int = 4):
+        self.token = token
+        self.out_dir = pathlib.Path(out_dir)
+        self.concurrency = concurrency
+        self.session = requests.Session()
 
-    # build filename
-    fname = f"{rec.title}.mp4"
-    fname = safe_filename(fname)
-    out_path = pathlib.Path(out_dir) / fname
+    def download_batch(self, recordings: list[ZoomRecord]) -> list[DownloadResult]:
+        """Download a batch of recordings concurrently."""
+        if not recordings:
+            return []
 
-    headers = {"Authorization": f"Bearer {access_token}"}
-    try:
-        # try header first
-        with session.get(download_url, headers=headers, stream=True, timeout=60) as r:
-            if r.status_code == 200 and r.headers.get("content-type", "").startswith(
-                    ("video", "application/octet-stream", "application/")):
-                _stream_write(r, out_path)
-                return {"status": "ok", "path": str(out_path), "title": rec.title}
-        # try query param fallback
-        sep = "&" if "?" in download_url else "?"
-        url_with_token = f"{download_url}{sep}access_token={access_token}"
-        with session.get(url_with_token, stream=True, timeout=60) as r2:
-            if r2.status_code == 200:
-                _stream_write(r2, out_path)
-                return {"status": "ok", "path": str(out_path), "title": rec.title}
-            else:
-                return {"status": "error", "code": r2.status_code, "reason": r2.text[:500], "title": rec.title}
-    except Exception as e:
-        return {"status": "exception", "error": str(e), "title": rec.title}
+        results = []
+        with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+            futures = {executor.submit(self._download_one, rec): rec for rec in recordings}
 
+            with tqdm(total=len(futures), desc="Downloading", unit="file") as pbar:
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    pbar.set_postfix_str(f"last: {result.status}")
+                    pbar.update(1)
 
-def _stream_write(resp, out_path):
-    """Write response stream to file without progress bar (to avoid tqdm conflicts)."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1 << 20):
-            if chunk:
-                f.write(chunk)
+        return results
 
-
-def load_previous_downloads(out_dir):
-    """Load previously downloaded files from report to avoid re-downloading."""
-    report_path = pathlib.Path(out_dir) / "download_report.json"
-    downloaded_titles = set()
-    if report_path.exists():
+    def _download_one(self, rec: ZoomRecord) -> DownloadResult:
+        """Download a single recording."""
         try:
-            with open(report_path, "r", encoding="utf8") as fh:
-                data = json.load(fh)
-                for result in data.get("results", []):
-                    if result.get("status") in ("ok", "skipped"):
-                        downloaded_titles.add(result.get("title"))
+            if not rec.download_url:
+                return DownloadResult(status="no_url", title=rec.title)
+
+            # Build filename
+            fname = self._safe_filename(f"{rec.title}.mp4")
+            out_path = self.out_dir / fname
+
+            # Download
+            headers = {"Authorization": f"Bearer {self.token}"}
+
+            # Try header authentication first
+            with self.session.get(rec.download_url, headers=headers, stream=True, timeout=60) as r:
+                if r.status_code == 200 and r.headers.get("content-type", "").startswith(
+                    ("video", "application/octet-stream", "application/")):
+                    self._write_stream(r, out_path)
+                    return DownloadResult(status="ok", title=rec.title, path=str(out_path))
+
+            # Try query param fallback
+            sep = "&" if "?" in rec.download_url else "?"
+            url_with_token = f"{rec.download_url}{sep}access_token={self.token}"
+
+            with self.session.get(url_with_token, stream=True, timeout=60) as r:
+                if r.status_code == 200:
+                    self._write_stream(r, out_path)
+                    return DownloadResult(status="ok", title=rec.title, path=str(out_path))
+                else:
+                    error_msg = f"HTTP {r.status_code}: {r.text[:500]}"
+                    return DownloadResult(status="error", title=rec.title, error=error_msg)
+
         except Exception as e:
-            print(f"Warning: Could not load previous download report: {e}")
-    return downloaded_titles
+            return DownloadResult(status="exception", title=rec.title, error=str(e))
+
+    @staticmethod
+    def _write_stream(resp, out_path: pathlib.Path):
+        """Write HTTP response stream to file."""
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1 << 20):  # 1MB chunks
+                if chunk:
+                    f.write(chunk)
+
+    @staticmethod
+    def _safe_filename(s: str) -> str:
+        """Convert string to safe filename."""
+        keep = "-_.() abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        return "".join(c if c in keep else "_" for c in s)[:200].strip()
+
+
+# ============================================================================
+# Main Application
+# ============================================================================
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Bulk download Zoom cloud recordings",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Download last 7 days
+  python download.py --from 2025-01-01 --to 2025-01-07
+
+  # Download with custom output directory and concurrency
+  python download.py --out ~/zoom_backups --concurrency 8
+
+  # Download for specific user
+  python download.py --user me
+        """
+    )
+
+    parser.add_argument("--from", dest="start", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--to", dest="end", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--out", default="./zoom_downloads", help="Output directory (default: ./zoom_downloads)")
+    parser.add_argument("--concurrency", type=int, default=4, help="Concurrent downloads (default: 4)")
+    parser.add_argument("--user", dest="user_id", default="me", help="User email or 'me' for user-level listing")
+    parser.add_argument("--days", type=int, default=7, help="Number of days to look back if no dates specified (default: 7)")
+
+    return parser.parse_args()
 
 
 def main():
-    p = argparse.ArgumentParser(description="Bulk download Zoom recordings")
-    p.add_argument("--from", dest="start", required=False, help="Start date (YYYY-MM-DD)")
-    p.add_argument("--to", dest="end", required=False, help="End date (YYYY-MM-DD)")
-    p.add_argument("--out", default="./zoom_downloads", help="Output directory")
-    p.add_argument("--concurrency", type=int, default=4, help="Number of concurrent downloads")
-    p.add_argument("--user", dest="user_id", default=None, help="User email or 'me' for user-level listing")
-    args = p.parse_args()
+    """Main application entry point."""
+    args = parse_args()
 
-    account_id = "***REMOVED***"  # os.getenv("ZOOM_ACCOUNT_ID")
-    client_id = "***REMOVED***"  # os.getenv("ZOOM_CLIENT_ID")
-    client_secret = "***REMOVED***"  # os.getenv("ZOOM_CLIENT_SECRET")
-    if not (account_id and client_id and client_secret):
-        print("Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET in environment.", file=sys.stderr)
-        sys.exit(2)
+    # Load credentials
+    account_id = "***REMOVED***"  # TODO: os.getenv("ZOOM_ACCOUNT_ID")
+    client_id = "***REMOVED***"  # TODO: os.getenv("ZOOM_CLIENT_ID")
+    client_secret = "***REMOVED***"  # TODO: os.getenv("ZOOM_CLIENT_SECRET")
 
-    # default dates: last 3 days
+    if not all([account_id, client_id, client_secret]):
+        print("Error: Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET")
+        return 1
+
+    # Set date range
     if not args.start:
-        args.start = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+        args.start = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=args.days)).strftime("%Y-%m-%d")
     if not args.end:
         args.end = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
 
-    print("Getting S2S token...")
-    token = get_s2s_token(account_id, client_id, client_secret)
+    print(f"Zoom Download Tool")
+    print(f"Date range: {args.start} to {args.end}")
+    print(f"Output: {args.out}")
+    print()
 
-    print("Listing recordings...")
-    args.user_id = args.user_id or "me"
-    if args.user_id:
-        recs = list_user_recordings(token, args.user_id, args.start, args.end)
-    else:
-        recs = list_account_recordings(token, account_id, args.start, args.end)
-    print(f"Found {len(recs)} recording files.")
+    # Initialize components
+    client = ZoomClient(account_id, client_id, client_secret)
+    report_path = pathlib.Path(args.out) / "download_report.json"
+    report = DownloadReport.load(report_path)
 
-    # Load previously downloaded files
-    previously_downloaded = load_previous_downloads(args.out)
-    recs_to_download = [r for r in recs if r.title not in previously_downloaded]
+    # Get OAuth token
+    print("Authenticating...")
+    client.get_token()
 
-    if len(recs_to_download) < len(recs):
-        print(f"Skipping {len(recs) - len(recs_to_download)} already downloaded files.")
-    print(f"Downloading {len(recs_to_download)} files...")
+    # List recordings
+    print("Fetching recordings list...")
+    user_id = args.user_id or "me"
+    recordings = client.list_recordings(args.start, args.end, user_id=user_id)
+    print(f"Found {len(recordings)} recordings")
 
-    # Download with single progress bar
-    results = []
-    session = requests.Session()
-    with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        futures = {ex.submit(download_one, r, token, args.out, session): r for r in recs_to_download}
-        with tqdm(total=len(futures), desc="Downloading", unit="file") as pbar:
-            for fut in as_completed(futures):
-                result = fut.result()
-                results.append(result)
-                # Update progress bar description with current status
-                status = result.get("status", "unknown")
-                pbar.set_postfix_str(f"last: {status}")
-                pbar.update(1)
+    # Filter out already downloaded
+    previously_downloaded = report.get_successful_titles()
+    to_download = [r for r in recordings if r.title not in previously_downloaded]
 
-    # Write metadata report
-    pathlib.Path(args.out).mkdir(parents=True, exist_ok=True)
-    with open(pathlib.Path(args.out) / "download_report.json", "w", encoding="utf8") as fh:
-        json.dump({
-            "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            "date_range": {"from": args.start, "to": args.end},
-            "results": results
-        }, fh, indent=2, ensure_ascii=False)
+    if len(to_download) < len(recordings):
+        skipped_count = len(recordings) - len(to_download)
+        print(f"Skipping {skipped_count} already downloaded recordings")
+
+    if not to_download:
+        print("Nothing new to download!")
+        return 0
+
+    print(f"Downloading {len(to_download)} new recordings...")
+    print()
+
+    # Download
+    manager = DownloadManager(client.get_token(), args.out, args.concurrency)
+    results = manager.download_batch(to_download)
+
+    # Update report
+    for result in results:
+        report.add_result(result)
+    report.save(report_path)
 
     # Print summary
-    success = sum(1 for r in results if r["status"] == "ok")
-    skipped = sum(1 for r in results if r["status"] == "skipped")
-    errors = sum(1 for r in results if r["status"] in ("error", "exception", "no_url"))
-    print(f"\nDone! Success: {success}, Skipped: {skipped}, Errors: {errors}")
-    print(f"Report: {pathlib.Path(args.out) / 'download_report.json'}")
+    stats = report.get_stats(results)
+    print()
+    print("=" * 60)
+    print(f"Download Summary:")
+    print(f"  Success: {stats['success']}")
+    print(f"  Errors: {stats['errors']}")
+    print(f"  Total in history: {stats['total_in_report']}")
+    print(f"  Report: {report_path}")
+    print("=" * 60)
+
+    return 0 if stats['errors'] == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())
