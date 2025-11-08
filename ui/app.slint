@@ -21,6 +21,8 @@ component ProgressBar inherits Rectangle {
     background: #e0e0e0;
 
     Rectangle {
+        // FIX: Anchor to the left side (x: 0) to ensure left-to-right growth
+        x: 0;
         width: parent.width * progress;
         height: parent.height;
         border-radius: parent.border-radius;
@@ -46,9 +48,6 @@ export component AppWindow inherits Window {
     callback stop_download();
     callback update_credentials(string, string, string);
 
-    in-out property <string> account_id: "";
-    in-out property <string> client_id: "";
-    in-out property <string> client_secret: "";
     in-out property <string> start_date: "";
     in-out property <string> end_date: "";
     in-out property <string> output_dir: "./zoom_downloads";
