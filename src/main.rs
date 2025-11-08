@@ -4,7 +4,7 @@ mod zoom_api;
 
 use chrono::{Duration, Utc};
 use downloader::DownloadManager;
-use report::DownloadReport;
+use report::{DownloadReport, DownloadStatus};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -58,7 +58,7 @@ async fn main() -> Result<(), slint::PlatformError> {
 
     // Shared state for recordings and download manager
     let recordings = Arc::new(Mutex::new(Vec::<ZoomRecord>::new()));
-    let download_manager = Arc::new(Mutex::new(None::<DownloadManager>));
+    let download_manager = Arc::new(Mutex::new(None::<Arc<DownloadManager>>));
 
     // Fetch recordings callback
     {
@@ -197,9 +197,7 @@ async fn main() -> Result<(), slint::PlatformError> {
                 let report_path = PathBuf::from(&output_dir).join("download_report.json");
                 let mut report = DownloadReport::load(&report_path)
                     .await
-                    .unwrap_or_else(|_| DownloadReport {
-                        results: Vec::new(),
-                    });
+                    .unwrap_or_else(|_| DownloadReport { results: Vec::new() });
 
                 let previously_downloaded = report.get_successful_titles();
                 let all_recordings = recordings.lock().unwrap().clone();
@@ -235,16 +233,11 @@ async fn main() -> Result<(), slint::PlatformError> {
                 });
 
                 // Create download manager
-                let manager = DownloadManager::new(token, PathBuf::from(&output_dir), concurrency);
+                let manager = Arc::new(DownloadManager::new(token, PathBuf::from(&output_dir), concurrency));
                 manager.reset_progress();
 
                 // Store manager for potential cancellation
-                *download_manager.lock().unwrap() = Some(manager);
-                let manager_ref = {
-                    let guard = download_manager.lock().unwrap();
-                    guard.as_ref().unwrap() as *const DownloadManager
-                };
-                let manager = unsafe { &*manager_ref };
+                *download_manager.lock().unwrap() = Some(manager.clone());
 
                 // Progress callback
                 let app_weak_progress = app_weak.clone();
@@ -274,7 +267,7 @@ async fn main() -> Result<(), slint::PlatformError> {
 
                 // Update report
                 for result in &results {
-                    if result.status != "cancelled" {
+                    if result.status != DownloadStatus::Cancelled {
                         report.add_result(result.clone());
                     }
                 }

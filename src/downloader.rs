@@ -1,4 +1,4 @@
-use crate::report::DownloadResult;
+use crate::report::{DownloadResult, DownloadStatus};
 use crate::zoom_api::ZoomRecord;
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
@@ -59,7 +59,7 @@ impl DownloadManager {
             .await
             .context("Failed to create output directory")?;
 
-        let _total_count = recordings.len();
+        // let _total_count = recordings.len();
         let completed_count = Arc::new(AtomicU64::new(0));
         let failed_count = Arc::new(AtomicU64::new(0));
 
@@ -84,11 +84,11 @@ impl DownloadManager {
                         download_one(client, token, out_dir, recording, shutdown, progress_bytes.clone(), callback.clone(), completed.clone(), failed.clone())
                             .await;
 
-                    match result.status.as_str() {
-                        "ok" => completed.fetch_add(1, Ordering::SeqCst),
-                        "error" | "exception" | "no_url" => failed.fetch_add(1, Ordering::SeqCst),
-                        _ => 0,
-                    };
+                    match result.status {
+                        DownloadStatus::Ok => { completed.fetch_add(1, Ordering::SeqCst); }
+                        DownloadStatus::Error | DownloadStatus::Exception | DownloadStatus::NoUrl => { failed.fetch_add(1, Ordering::SeqCst); }
+                        _ => {}
+                    }
 
                     // Call progress callback if provided
                     if let Some(ref cb) = callback {

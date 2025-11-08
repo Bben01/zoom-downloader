@@ -5,9 +5,20 @@ use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadStatus {
+    Ok,
+    Skipped,
+    Error,
+    Exception,
+    NoUrl,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadResult {
-    pub status: String, // ok, skipped, error, exception, no_url, cancelled
+    pub status: DownloadStatus, // ok, skipped, error, exception, no_url, cancelled
     pub title: String,
     pub path: Option<String>,
     pub error: Option<String>,
@@ -17,7 +28,7 @@ pub struct DownloadResult {
 impl DownloadResult {
     pub fn ok(title: String, path: String) -> Self {
         Self {
-            status: "ok".to_string(),
+            status: DownloadStatus::Ok,
             title,
             path: Some(path),
             error: None,
@@ -27,7 +38,7 @@ impl DownloadResult {
 
     pub fn skipped(title: String) -> Self {
         Self {
-            status: "skipped".to_string(),
+            status: DownloadStatus::Skipped,
             title,
             path: None,
             error: None,
@@ -37,7 +48,7 @@ impl DownloadResult {
 
     pub fn error(title: String, error: String) -> Self {
         Self {
-            status: "error".to_string(),
+            status: DownloadStatus::Error,
             title,
             path: None,
             error: Some(error),
@@ -47,7 +58,7 @@ impl DownloadResult {
 
     pub fn no_url(title: String) -> Self {
         Self {
-            status: "no_url".to_string(),
+            status: DownloadStatus::NoUrl,
             title,
             path: None,
             error: Some("No download URL".to_string()),
@@ -57,7 +68,7 @@ impl DownloadResult {
 
     pub fn cancelled(title: String) -> Self {
         Self {
-            status: "cancelled".to_string(),
+            status: DownloadStatus::Cancelled,
             title,
             path: None,
             error: Some("Download cancelled".to_string()),
@@ -81,9 +92,7 @@ impl DownloadReport {
                 serde_json::from_str(&content).context("Failed to parse report JSON")?;
             Ok(report)
         } else {
-            Ok(Self {
-                results: Vec::new(),
-            })
+            Ok(Self { results: Vec::new() })
         }
     }
 
@@ -109,18 +118,18 @@ impl DownloadReport {
     pub fn get_successful_titles(&self) -> HashSet<String> {
         self.results
             .iter()
-            .filter(|r| r.status == "ok" || r.status == "skipped")
+            .filter(|r| r.status == DownloadStatus::Ok || r.status == DownloadStatus::Skipped)
             .map(|r| r.title.clone())
             .collect()
     }
 
     pub fn get_stats(&self, recent_results: &[DownloadResult]) -> DownloadStats {
         DownloadStats {
-            success: recent_results.iter().filter(|r| r.status == "ok").count(),
-            skipped: recent_results.iter().filter(|r| r.status == "skipped").count(),
+            success: recent_results.iter().filter(|r| r.status == DownloadStatus::Ok).count(),
+            skipped: recent_results.iter().filter(|r| r.status == DownloadStatus::Skipped).count(),
             errors: recent_results
                 .iter()
-                .filter(|r| matches!(r.status.as_str(), "error" | "exception" | "no_url"))
+                .filter(|r| matches!(r.status, DownloadStatus::Error | DownloadStatus::Exception | DownloadStatus::NoUrl))
                 .count(),
             total_in_report: self.results.len(),
         }
