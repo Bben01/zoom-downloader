@@ -243,9 +243,8 @@ class DownloadManager:
 
     def _signal_handler(self, signum, frame):
         """Handle Ctrl+C gracefully."""
-        logger.warning("Interrupt received, shutting down gracefully...")
+        logger.warning("\nInterrupt received, stopping downloads immediately...")
         self._shutdown = True
-        sys.exit(1)
 
     def download_batch(self, recordings: list[ZoomRecord]) -> list[DownloadResult]:
         """Download a batch of recordings concurrently."""
@@ -264,6 +263,9 @@ class DownloadManager:
 
                 for future in as_completed(futures):
                     if self._shutdown:
+                        # Cancel all pending futures immediately
+                        for f in futures:
+                            f.cancel()
                         executor.shutdown(wait=False, cancel_futures=True)
                         break
                     result = future.result()
@@ -275,22 +277,34 @@ class DownloadManager:
 
     def _download_one(self, rec: ZoomRecord, pbar: tqdm) -> DownloadResult:
         """Download a single recording."""
+        tmp_path = None
         try:
+            if self._shutdown:
+                return DownloadResult(status="cancelled", title=rec.title)
+
             if not rec.download_url:
                 return DownloadResult(status="no_url", title=rec.title)
 
             # Build filename
             fname = self._safe_filename(f"{rec.title}.mp4")
             out_path = self.out_dir / fname
+            tmp_path = self.out_dir / f"{fname}.tmp"
 
-            # Download
+            # Download to temp file first
             headers = {"Authorization": f"Bearer {self.token}"}
 
             # Try header authentication first
             with self.session.get(rec.download_url, headers=headers, stream=True, timeout=60) as r:
                 if r.status_code == 200 and r.headers.get("content-type", "").startswith(
                     ("video", "application/octet-stream", "application/")):
-                    self._write_stream(r, out_path, pbar)
+                    self._write_stream(r, tmp_path, pbar)
+                    if self._shutdown:
+                        # Clean up partial download
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                        return DownloadResult(status="cancelled", title=rec.title)
+                    # Move from temp to final location
+                    tmp_path.rename(out_path)
                     return DownloadResult(status="ok", title=rec.title, path=str(out_path))
 
             # Try query param fallback
@@ -299,7 +313,14 @@ class DownloadManager:
 
             with self.session.get(url_with_token, stream=True, timeout=60) as r:
                 if r.status_code == 200:
-                    self._write_stream(r, out_path, pbar)
+                    self._write_stream(r, tmp_path, pbar)
+                    if self._shutdown:
+                        # Clean up partial download
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                        return DownloadResult(status="cancelled", title=rec.title)
+                    # Move from temp to final location
+                    tmp_path.rename(out_path)
                     return DownloadResult(status="ok", title=rec.title, path=str(out_path))
                 else:
                     error_msg = f"HTTP {r.status_code}: {r.text[:500]}"
@@ -307,16 +328,24 @@ class DownloadManager:
                     return DownloadResult(status="error", title=rec.title, error=error_msg)
 
         except Exception as e:
+            # Clean up partial download on exception
+            if tmp_path and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
             logger.error(f"Exception downloading {rec.title}: {e}")
             return DownloadResult(status="exception", title=rec.title, error=str(e))
 
-    @staticmethod
-    def _write_stream(resp, out_path: pathlib.Path, pbar: tqdm):
+    def _write_stream(self, resp, out_path: pathlib.Path, pbar: tqdm):
         """Write HTTP response stream to file with byte-level progress tracking."""
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(out_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1 << 20):  # 1MB chunks
+                if self._shutdown:
+                    # Stop writing immediately on interrupt
+                    raise InterruptedError("Download interrupted")
                 if chunk:
                     f.write(chunk)
                     pbar.update(len(chunk))
@@ -416,9 +445,10 @@ def main():
     manager = DownloadManager(client.get_token(), args.out, args.concurrency)
     results = manager.download_batch(to_download)
 
-    # Update report
+    # Update report only with successful downloads (exclude cancelled ones)
     for result in results:
-        report.add_result(result)
+        if result.status != "cancelled":
+            report.add_result(result)
     report.save(report_path)
 
     # Print summary
