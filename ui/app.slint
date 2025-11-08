@@ -1,0 +1,252 @@
+import { Button, LineEdit, SpinBox, CheckBox, VerticalBox, HorizontalBox, ScrollView, GridBox, GroupBox } from "std-widgets.slint";
+
+export struct Recording {
+    title: string,
+    date: string,
+    size: string,
+}
+
+export struct DownloadStats {
+    total: int,
+    completed: int,
+    failed: int,
+    progress: float,
+}
+
+component ProgressBar inherits Rectangle {
+    in property <float> progress: 0.0; // 0.0 to 1.0
+
+    height: 24px;
+    border-radius: 4px;
+    background: #e0e0e0;
+
+    Rectangle {
+        width: parent.width * progress;
+        height: parent.height;
+        border-radius: parent.border-radius;
+        background: #4CAF50;
+    }
+
+    Text {
+        text: Math.round(progress * 100) + "%";
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: progress > 0.5 ? #fff : #000;
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Zoom Recording Downloader";
+    preferred-width: 900px;
+    preferred-height: 700px;
+    background: #f5f5f5;
+
+    callback fetch_recordings();
+    callback start_download();
+    callback stop_download();
+    callback update_credentials(string, string, string);
+
+    in-out property <string> account_id: "";
+    in-out property <string> client_id: "";
+    in-out property <string> client_secret: "";
+    in-out property <string> start_date: "";
+    in-out property <string> end_date: "";
+    in-out property <string> output_dir: "./zoom_downloads";
+    in-out property <int> concurrency: 4;
+    in-out property <string> status_text: "Ready";
+    in-out property <bool> is_downloading: false;
+    in-out property <bool> is_fetching: false;
+    in-out property <[Recording]> recordings: [];
+    in-out property <DownloadStats> stats: { total: 0, completed: 0, failed: 0, progress: 0.0 };
+
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+
+        // Header
+        Text {
+            text: "Zoom Recording Downloader";
+            font-size: 24px;
+            font-weight: 700;
+            color: #2563eb;
+            horizontal-alignment: center;
+        }
+
+        // Credentials Section
+        GroupBox {
+            title: "API Credentials";
+
+            GridBox {
+                spacing: 10px;
+
+                Row {
+                    Text { text: "Account ID:"; }
+                    LineEdit {
+                        text <=> account_id;
+                        placeholder-text: "Enter Zoom Account ID";
+                    }
+                }
+
+                Row {
+                    Text { text: "Client ID:"; }
+                    LineEdit {
+                        text <=> client_id;
+                        placeholder-text: "Enter Client ID";
+                    }
+                }
+
+                Row {
+                    Text { text: "Client Secret:"; }
+                    LineEdit {
+                        text <=> client_secret;
+                        placeholder-text: "Enter Client Secret";
+                        input-type: password;
+                    }
+                }
+            }
+        }
+
+        // Date Range and Settings
+        GroupBox {
+            title: "Download Settings";
+
+            GridBox {
+                spacing: 10px;
+
+                Row {
+                    Text { text: "Start Date:"; }
+                    LineEdit {
+                        text <=> start_date;
+                        placeholder-text: "YYYY-MM-DD";
+                    }
+                }
+
+                Row {
+                    Text { text: "End Date:"; }
+                    LineEdit {
+                        text <=> end_date;
+                        placeholder-text: "YYYY-MM-DD";
+                    }
+                }
+
+                Row {
+                    Text { text: "Output Directory:"; }
+                    LineEdit {
+                        text <=> output_dir;
+                        placeholder-text: "./zoom_downloads";
+                    }
+                }
+
+                Row {
+                    Text { text: "Concurrency:"; }
+                    SpinBox {
+                        value <=> concurrency;
+                        minimum: 1;
+                        maximum: 16;
+                    }
+                }
+            }
+        }
+
+        // Action Buttons
+        HorizontalBox {
+            spacing: 10px;
+            alignment: center;
+
+            Button {
+                text: "Fetch Recordings";
+                enabled: !is_fetching && !is_downloading;
+                primary: true;
+                clicked => {
+                    root.fetch_recordings();
+                }
+            }
+
+            Button {
+                text: is_downloading ? "Stop Download" : "Start Download";
+                enabled: recordings.length > 0 && !is_fetching;
+                primary: !is_downloading;
+                clicked => {
+                    if (is_downloading) {
+                        root.stop_download();
+                    } else {
+                        root.start_download();
+                    }
+                }
+            }
+        }
+
+        // Status
+        Text {
+            text: status_text;
+            horizontal-alignment: center;
+            font-size: 14px;
+            color: #666;
+        }
+
+        // Progress Section
+        if is_downloading || stats.total > 0: GroupBox {
+            title: "Download Progress";
+
+            VerticalBox {
+                spacing: 10px;
+
+                HorizontalBox {
+                    spacing: 20px;
+
+                    Text { text: "Total: " + stats.total; }
+                    Text { text: "Completed: " + stats.completed; color: #4CAF50; }
+                    Text { text: "Failed: " + stats.failed; color: #f44336; }
+                }
+
+                ProgressBar {
+                    progress: stats.progress;
+                }
+            }
+        }
+
+        // Recordings List
+        GroupBox {
+            title: "Recordings (" + recordings.length + ")";
+
+            ScrollView {
+                height: 250px;
+
+                VerticalBox {
+                    spacing: 5px;
+
+                    for recording[index] in recordings: Rectangle {
+                        height: 40px;
+                        background: Math.mod(index, 2) == 0 ? #fff : #f9f9f9;
+                        border-radius: 4px;
+
+                        HorizontalBox {
+                            padding: 10px;
+                            spacing: 10px;
+
+                            Text {
+                                text: recording.title;
+                                horizontal-stretch: 2;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: recording.date;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                color: #666;
+                            }
+
+                            Text {
+                                text: recording.size;
+                                horizontal-stretch: 0;
+                                vertical-alignment: center;
+                                color: #999;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

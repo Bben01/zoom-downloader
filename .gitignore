@@ -1,3 +1,10 @@
 .idea
 .venv
 zoom_downloads
+.DS_Store
+
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
