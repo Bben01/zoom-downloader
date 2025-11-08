@@ -1,4 +1,4 @@
-import { Button, LineEdit, SpinBox, CheckBox, VerticalBox, HorizontalBox, ScrollView, GridBox, GroupBox } from "std-widgets.slint";
+import { Button, LineEdit, SpinBox, CheckBox, VerticalBox, HorizontalBox, ScrollView, GridBox, GroupBox, DatePickerPopup } from "std-widgets.slint";
 
 export struct Recording {
     title: string,
@@ -21,7 +21,6 @@ component ProgressBar inherits Rectangle {
     background: #e0e0e0;
 
     Rectangle {
-        // FIX: Anchor to the left side (x: 0) to ensure left-to-right growth
         x: 0;
         width: parent.width * progress;
         height: parent.height;
@@ -80,17 +79,59 @@ export component AppWindow inherits Window {
 
                 Row {
                     Text { text: "Start Date:"; }
-                    LineEdit {
-                        text <=> start_date;
-                        placeholder-text: "YYYY-MM-DD";
+                    // Button that shows currently selected date (or placeholder) and opens date picker
+                    Button {
+                        text: start_date == "" ? "Select Start Date" : start_date;
+                        clicked => {
+                            start_date_picker.show();
+                        }
+                    }
+
+                    // DatePickerPopup for start date
+                    start_date_picker := DatePickerPopup {
+                        x: (root.width - self.width) / 2;
+                        y: (root.height - self.height ) / 2;
+                        close-policy: PopupClosePolicy.close-on-click-outside;
+
+                        // accepted provides a Date struct { year, month, day, ... }
+                        accepted(date) => {
+                            // format to YYYY-MM-DD with zero padding
+                            root.start_date = date.year + "-" +
+                                (date.month < 10 ? "0" + date.month : "" + date.month) + "-" +
+                                (date.day < 10 ? "0" + date.day : "" + date.day);
+                            start_date_picker.close();
+                        }
+
+                        canceled() => {
+                            start_date_picker.close();
+                        }
                     }
                 }
 
                 Row {
                     Text { text: "End Date:"; }
-                    LineEdit {
-                        text <=> end_date;
-                        placeholder-text: "YYYY-MM-DD";
+                    Button {
+                        text: end_date == "" ? "Select End Date" : end_date;
+                        clicked => {
+                            end_date_picker.show();
+                        }
+                    }
+
+                    end_date_picker := DatePickerPopup {
+                        x: (root.width - self.width) / 2;
+                        y: (root.height - self.height ) / 2;
+                        close-policy: PopupClosePolicy.close-on-click-outside;
+
+                        accepted(date) => {
+                            root.end_date = date.year + "-" +
+                                (date.month < 10 ? "0" + date.month : "" + date.month) + "-" +
+                                (date.day < 10 ? "0" + date.day : "" + date.day);
+                            end_date_picker.close();
+                        }
+
+                        canceled() => {
+                            end_date_picker.close();
+                        }
                     }
                 }
 
