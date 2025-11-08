@@ -20,6 +20,9 @@ import base64
 import json
 import pathlib
 import datetime
+import logging
+import signal
+import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -27,6 +30,14 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import msgspec
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -39,6 +50,7 @@ class ZoomRecord(msgspec.Struct):
     topic: str
     date: str
     download_url: str
+    file_size: int = 0
 
     def __hash__(self):
         return hash(self.download_url)
@@ -78,7 +90,7 @@ class DownloadReport:
                     data = json.load(fh)
                     return cls(results=data.get("results", []))
             except Exception as e:
-                print(f"Warning: Could not load report: {e}")
+                logger.warning(f"Could not load report: {e}")
         return cls(results=[])
 
     def save(self, report_path: pathlib.Path):
@@ -149,7 +161,33 @@ class ZoomClient:
         return self._paginate_recordings(url, start_date, end_date)
 
     def _paginate_recordings(self, url: str, start_date: str, end_date: str) -> set[ZoomRecord]:
-        """Paginate through all recordings."""
+        """Paginate through all recordings, splitting date ranges if necessary."""
+        # Zoom API limits to 30 days per request, so split if needed
+        start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        recordings = set()
+        current_start = start
+
+        while current_start <= end:
+            # Process in 30-day chunks
+            current_end = min(current_start + datetime.timedelta(days=29), end)
+
+            logger.info(f"Fetching recordings from {current_start} to {current_end}")
+            chunk_recordings = self._fetch_recordings_page(
+                url,
+                current_start.isoformat(),
+                current_end.isoformat()
+            )
+            recordings.update(chunk_recordings)
+
+            # Move to next chunk
+            current_start = current_end + datetime.timedelta(days=1)
+
+        return recordings
+
+    def _fetch_recordings_page(self, url: str, start_date: str, end_date: str) -> set[ZoomRecord]:
+        """Fetch recordings for a single date range (max 30 days)."""
         recordings = set()
         params = {"from": start_date, "to": end_date, "page_size": 300}
         headers = {"Authorization": f"Bearer {self.get_token()}"}
@@ -175,7 +213,8 @@ class ZoomClient:
                             title=title,
                             topic=topic,
                             date=date,
-                            download_url=f["download_url"]
+                            download_url=f["download_url"],
+                            file_size=f.get("file_size", 0)
                         ))
 
             next_token = j.get("next_page_token") or ""
@@ -197,26 +236,44 @@ class DownloadManager:
         self.out_dir = pathlib.Path(out_dir)
         self.concurrency = concurrency
         self.session = requests.Session()
+        self._shutdown = False
+
+        # Register signal handler for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle Ctrl+C gracefully."""
+        logger.warning("Interrupt received, shutting down gracefully...")
+        self._shutdown = True
+        sys.exit(1)
 
     def download_batch(self, recordings: list[ZoomRecord]) -> list[DownloadResult]:
         """Download a batch of recordings concurrently."""
         if not recordings:
             return []
 
-        results = []
-        with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
-            futures = {executor.submit(self._download_one, rec): rec for rec in recordings}
+        # Calculate total size from file_size field
+        total_bytes = sum(rec.file_size for rec in recordings)
 
-            with tqdm(total=len(futures), desc="Downloading", unit="file") as pbar:
+        results = []
+        pbar = tqdm(total=total_bytes, desc="Downloading", unit="B", unit_scale=True, unit_divisor=1024)
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+                futures = {executor.submit(self._download_one, rec, pbar): rec for rec in recordings}
+
                 for future in as_completed(futures):
+                    if self._shutdown:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
                     result = future.result()
                     results.append(result)
-                    pbar.set_postfix_str(f"last: {result.status}")
-                    pbar.update(1)
+        finally:
+            pbar.close()
 
         return results
 
-    def _download_one(self, rec: ZoomRecord) -> DownloadResult:
+    def _download_one(self, rec: ZoomRecord, pbar: tqdm) -> DownloadResult:
         """Download a single recording."""
         try:
             if not rec.download_url:
@@ -233,7 +290,7 @@ class DownloadManager:
             with self.session.get(rec.download_url, headers=headers, stream=True, timeout=60) as r:
                 if r.status_code == 200 and r.headers.get("content-type", "").startswith(
                     ("video", "application/octet-stream", "application/")):
-                    self._write_stream(r, out_path)
+                    self._write_stream(r, out_path, pbar)
                     return DownloadResult(status="ok", title=rec.title, path=str(out_path))
 
             # Try query param fallback
@@ -242,23 +299,27 @@ class DownloadManager:
 
             with self.session.get(url_with_token, stream=True, timeout=60) as r:
                 if r.status_code == 200:
-                    self._write_stream(r, out_path)
+                    self._write_stream(r, out_path, pbar)
                     return DownloadResult(status="ok", title=rec.title, path=str(out_path))
                 else:
                     error_msg = f"HTTP {r.status_code}: {r.text[:500]}"
+                    logger.error(f"Failed to download {rec.title}: {error_msg}")
                     return DownloadResult(status="error", title=rec.title, error=error_msg)
 
         except Exception as e:
+            logger.error(f"Exception downloading {rec.title}: {e}")
             return DownloadResult(status="exception", title=rec.title, error=str(e))
 
     @staticmethod
-    def _write_stream(resp, out_path: pathlib.Path):
-        """Write HTTP response stream to file."""
+    def _write_stream(resp, out_path: pathlib.Path, pbar: tqdm):
+        """Write HTTP response stream to file with byte-level progress tracking."""
         out_path.parent.mkdir(parents=True, exist_ok=True)
+
         with open(out_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1 << 20):  # 1MB chunks
                 if chunk:
                     f.write(chunk)
+                    pbar.update(len(chunk))
 
     @staticmethod
     def _safe_filename(s: str) -> str:
@@ -289,12 +350,12 @@ Examples:
         """
     )
 
-    parser.add_argument("--from", dest="start", help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--to", dest="end", help="End date (YYYY-MM-DD)")
-    parser.add_argument("--out", default="./zoom_downloads", help="Output directory (default: ./zoom_downloads)")
-    parser.add_argument("--concurrency", type=int, default=4, help="Concurrent downloads (default: 4)")
-    parser.add_argument("--user", dest="user_id", default="me", help="User email or 'me' for user-level listing")
-    parser.add_argument("--days", type=int, default=7, help="Number of days to look back if no dates specified (default: 7)")
+    parser.add_argument("--from", "-f", dest="start", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--to", "-t", dest="end", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--out", "-o", default="./zoom_downloads", help="Output directory (default: ./zoom_downloads)")
+    parser.add_argument("--concurrency", "-c", type=int, default=4, help="Concurrent downloads (default: 4)")
+    parser.add_argument("--user", "-u", dest="user_id", default="me", help="User email or 'me' for user-level listing")
+    parser.add_argument("--days", "-d", type=int, default=7, help="Number of days to look back if no dates specified (default: 7)")
 
     return parser.parse_args()
 
@@ -309,7 +370,7 @@ def main():
     client_secret = "***REMOVED***"  # TODO: os.getenv("ZOOM_CLIENT_SECRET")
 
     if not all([account_id, client_id, client_secret]):
-        print("Error: Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET")
+        logger.error("Error: Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET")
         return 1
 
     # Set date range
@@ -318,10 +379,9 @@ def main():
     if not args.end:
         args.end = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
 
-    print(f"Zoom Download Tool")
-    print(f"Date range: {args.start} to {args.end}")
-    print(f"Output: {args.out}")
-    print()
+    logger.info(f"Zoom Download Tool")
+    logger.info(f"Date range: {args.start} to {args.end}")
+    logger.info(f"Output: {args.out}")
 
     # Initialize components
     client = ZoomClient(account_id, client_id, client_secret)
@@ -329,14 +389,14 @@ def main():
     report = DownloadReport.load(report_path)
 
     # Get OAuth token
-    print("Authenticating...")
+    logger.info("Authenticating...")
     client.get_token()
 
     # List recordings
-    print("Fetching recordings list...")
+    logger.info("Fetching recordings list...")
     user_id = args.user_id or "me"
     recordings = client.list_recordings(args.start, args.end, user_id=user_id)
-    print(f"Found {len(recordings)} recordings")
+    logger.info(f"Found {len(recordings)} recordings")
 
     # Filter out already downloaded
     previously_downloaded = report.get_successful_titles()
@@ -344,14 +404,13 @@ def main():
 
     if len(to_download) < len(recordings):
         skipped_count = len(recordings) - len(to_download)
-        print(f"Skipping {skipped_count} already downloaded recordings")
+        logger.info(f"Skipping {skipped_count} already downloaded recordings")
 
     if not to_download:
-        print("Nothing new to download!")
+        logger.info("Nothing new to download!")
         return 0
 
-    print(f"Downloading {len(to_download)} new recordings...")
-    print()
+    logger.info(f"Downloading {len(to_download)} new recordings...")
 
     # Download
     manager = DownloadManager(client.get_token(), args.out, args.concurrency)
@@ -364,14 +423,13 @@ def main():
 
     # Print summary
     stats = report.get_stats(results)
-    print()
-    print("=" * 60)
-    print(f"Download Summary:")
-    print(f"  Success: {stats['success']}")
-    print(f"  Errors: {stats['errors']}")
-    print(f"  Total in history: {stats['total_in_report']}")
-    print(f"  Report: {report_path}")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info(f"Download Summary:")
+    logger.info(f"  Success: {stats['success']}")
+    logger.info(f"  Errors: {stats['errors']}")
+    logger.info(f"  Total in history: {stats['total_in_report']}")
+    logger.info(f"  Report: {report_path}")
+    logger.info("=" * 60)
 
     return 0 if stats['errors'] == 0 else 1
 
