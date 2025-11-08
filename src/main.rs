@@ -70,15 +70,12 @@ async fn main() -> Result<(), slint::PlatformError> {
             let recordings = recordings.clone();
 
             // Get values from UI before spawning
-            let (account_id, client_id, client_secret, start_date, end_date) = {
+            let (start_date, end_date) = {
                 let app = match app_weak.upgrade() {
                     Some(app) => app,
                     None => return,
                 };
                 (
-                    app.get_account_id().to_string(),
-                    app.get_client_id().to_string(),
-                    app.get_client_secret().to_string(),
                     app.get_start_date().to_string(),
                     app.get_end_date().to_string(),
                 )
@@ -90,15 +87,7 @@ async fn main() -> Result<(), slint::PlatformError> {
             });
 
             tokio::spawn(async move {
-                if account_id.is_empty() || client_id.is_empty() || client_secret.is_empty() {
-                    update_ui(&app_weak, |app| {
-                        app.set_status_text("Error: Please fill in all credentials".into());
-                        app.set_is_fetching(false);
-                    });
-                    return;
-                }
-
-                let mut client = ZoomClient::new(account_id, client_id, client_secret);
+                let mut client = ZoomClient::new();
 
                 match client.get_token().await {
                     Ok(_) => {
@@ -172,15 +161,12 @@ async fn main() -> Result<(), slint::PlatformError> {
             let download_manager = download_manager.clone();
 
             // Get values from UI before spawning
-            let (client_id, client_secret, account_id, output_dir, concurrency) = {
+            let (output_dir, concurrency) = {
                 let app = match app_weak.upgrade() {
                     Some(app) => app,
                     None => return,
                 };
                 (
-                    app.get_client_id().to_string(),
-                    app.get_client_secret().to_string(),
-                    app.get_account_id().to_string(),
                     app.get_output_dir().to_string(),
                     app.get_concurrency() as usize,
                 )
@@ -193,7 +179,7 @@ async fn main() -> Result<(), slint::PlatformError> {
 
             tokio::spawn(async move {
                 // Get OAuth token
-                let mut client = ZoomClient::new(account_id, client_id, client_secret);
+                let mut client = ZoomClient::new();
                 let token = match client.get_token().await {
                     Ok(t) => t,
                     Err(e) => {
@@ -208,11 +194,11 @@ async fn main() -> Result<(), slint::PlatformError> {
 
                 // Load report and filter already downloaded
                 let report_path = PathBuf::from(&output_dir).join("download_report.json");
-                let mut report = DownloadReport::load(&report_path).await.unwrap_or_else(|_| {
-                    DownloadReport {
+                let mut report = DownloadReport::load(&report_path)
+                    .await
+                    .unwrap_or_else(|_| DownloadReport {
                         results: Vec::new(),
-                    }
-                });
+                    });
 
                 let previously_downloaded = report.get_successful_titles();
                 let all_recordings = recordings.lock().unwrap().clone();

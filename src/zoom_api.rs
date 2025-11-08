@@ -50,7 +50,10 @@ pub struct ZoomClient {
 }
 
 impl ZoomClient {
-    pub fn new(account_id: String, client_id: String, client_secret: String) -> Self {
+    pub fn new() -> Self {
+        let account_id = "***REMOVED***".to_string();
+        let client_id = "***REMOVED***".to_string();
+        let client_secret = "***REMOVED***".to_string();
         Self {
             account_id,
             client_id,
@@ -166,7 +169,9 @@ impl ZoomClient {
             ];
 
             if let Some(ref token_val) = next_token {
-                params.push(("next_page_token", token_val.clone()));
+                if !token_val.is_empty() {
+                    params.push(("next_page_token", token_val.clone()));
+                }
             }
 
             let response = self
@@ -209,7 +214,9 @@ impl ZoomClient {
                 }
             }
 
-            next_token = recordings_response.next_page_token;
+            next_token = recordings_response
+                .next_page_token
+                .filter(|s| !s.is_empty());
             if next_token.is_none() {
                 break;
             }

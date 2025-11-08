@@ -72,40 +72,6 @@ export component AppWindow inherits Window {
             horizontal-alignment: center;
         }
 
-        // Credentials Section
-        GroupBox {
-            title: "API Credentials";
-
-            GridBox {
-                spacing: 10px;
-
-                Row {
-                    Text { text: "Account ID:"; }
-                    LineEdit {
-                        text <=> account_id;
-                        placeholder-text: "Enter Zoom Account ID";
-                    }
-                }
-
-                Row {
-                    Text { text: "Client ID:"; }
-                    LineEdit {
-                        text <=> client_id;
-                        placeholder-text: "Enter Client ID";
-                    }
-                }
-
-                Row {
-                    Text { text: "Client Secret:"; }
-                    LineEdit {
-                        text <=> client_secret;
-                        placeholder-text: "Enter Client Secret";
-                        input-type: password;
-                    }
-                }
-            }
-        }
-
         // Date Range and Settings
         GroupBox {
             title: "Download Settings";
