@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -198,7 +198,7 @@ impl ZoomClient {
                 let topic = meeting.topic.trim().to_string();
                 let start_time = DateTime::parse_from_rfc3339(&meeting.start_time.replace("Z", "+00:00"))
                     .context("Failed to parse meeting start time")?;
-                let date = start_time.format("%Y-%m-%d").to_string();
+                let date = start_time.format("%Y-%m-%d %Hh%M").to_string();
                 let title = format!("{} - {}", topic, date);
 
                 for file in meeting.recording_files {

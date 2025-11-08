@@ -81,7 +81,7 @@ impl DownloadManager {
                     }
 
                     let result =
-                        download_one(client, token, out_dir, recording, shutdown, progress_bytes.clone())
+                        download_one(client, token, out_dir, recording, shutdown, progress_bytes.clone(), callback.clone(), completed.clone(), failed.clone())
                             .await;
 
                     match result.status.as_str() {
@@ -116,6 +116,9 @@ async fn download_one(
     recording: ZoomRecord,
     shutdown: Arc<AtomicBool>,
     progress_bytes: Arc<AtomicU64>,
+    progress_callback: Option<Arc<dyn Fn(u64, usize, usize) + Send + Sync>>,
+    completed: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
 ) -> DownloadResult {
     if shutdown.load(Ordering::SeqCst) {
         return DownloadResult::cancelled(recording.title.clone());
@@ -138,6 +141,9 @@ async fn download_one(
         &tmp_path,
         &shutdown,
         &progress_bytes,
+        progress_callback,
+        completed,
+        failed,
     )
     .await
     {
@@ -174,6 +180,9 @@ async fn try_download(
     tmp_path: &Path,
     shutdown: &Arc<AtomicBool>,
     progress_bytes: &Arc<AtomicU64>,
+    progress_callback: Option<Arc<dyn Fn(u64, usize, usize) + Send + Sync>>,
+    completed: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
 ) -> Result<()> {
     // Try header authentication first
     let response = client
@@ -194,7 +203,7 @@ async fn try_download(
             || content_type.starts_with("application/octet-stream")
             || content_type.starts_with("application/")
         {
-            return write_stream(response, tmp_path, shutdown, progress_bytes).await;
+            return write_stream(response, tmp_path, shutdown, progress_bytes, progress_callback, completed, failed).await;
         }
     }
 
@@ -209,7 +218,7 @@ async fn try_download(
         .context("Failed to send request with token in URL")?;
 
     if response.status().is_success() {
-        write_stream(response, tmp_path, shutdown, progress_bytes).await
+        write_stream(response, tmp_path, shutdown, progress_bytes, progress_callback, completed, failed).await
     } else {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
@@ -222,6 +231,9 @@ async fn write_stream(
     out_path: &Path,
     shutdown: &Arc<AtomicBool>,
     progress_bytes: &Arc<AtomicU64>,
+    progress_callback: Option<Arc<dyn Fn(u64, usize, usize) + Send + Sync>>,
+    completed: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
 ) -> Result<()> {
     // Create parent directory if needed
     if let Some(parent) = out_path.parent() {
@@ -246,6 +258,13 @@ async fn write_stream(
             .context("Failed to write chunk")?;
 
         progress_bytes.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+
+        if let Some(ref cb) = progress_callback {
+            let bytes = progress_bytes.load(Ordering::SeqCst);
+            let completed_val = completed.load(Ordering::SeqCst) as usize;
+            let failed_val = failed.load(Ordering::SeqCst) as usize;
+            cb(bytes, completed_val, failed_val);
+        }
     }
 
     file.flush().await.context("Failed to flush file")?;

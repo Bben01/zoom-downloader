@@ -110,7 +110,8 @@ async fn main() -> Result<(), slint::PlatformError> {
                     .await
                 {
                     Ok(recs) => {
-                        let rec_vec: Vec<ZoomRecord> = recs.into_iter().collect();
+                        let mut rec_vec: Vec<ZoomRecord> = recs.into_iter().collect();
+                        rec_vec.sort_by(|a, b| a.date.cmp(&b.date));
                         let count = rec_vec.len();
 
                         // Update UI with recordings
@@ -318,6 +319,18 @@ async fn main() -> Result<(), slint::PlatformError> {
                 manager.signal_shutdown();
                 update_ui(&app_weak, |app| {
                     app.set_status_text("Stopping downloads...".into());
+                });
+            }
+        });
+    }
+
+    // File picker callback
+    {
+        let app_weak = app_weak.clone();
+        app.on_request_dir_pick(move || {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                update_ui(&app_weak, move |app| {
+                    app.set_output_dir(SharedString::from(path.display().to_string()));
                 });
             }
         });

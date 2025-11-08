@@ -46,6 +46,7 @@ export component AppWindow inherits Window {
     callback start_download();
     callback stop_download();
     callback update_credentials(string, string, string);
+    callback request_dir_pick();
 
     in-out property <string> start_date: "";
     in-out property <string> end_date: "";
@@ -120,7 +121,6 @@ export component AppWindow inherits Window {
                     end_date_picker := DatePickerPopup {
                         x: (root.width - self.width) / 2;
                         y: (root.height - self.height ) / 2;
-                        close-policy: PopupClosePolicy.close-on-click-outside;
 
                         accepted(date) => {
                             root.end_date = date.year + "-" +
@@ -137,14 +137,14 @@ export component AppWindow inherits Window {
 
                 Row {
                     Text { text: "Output Directory:"; }
-                    LineEdit {
+                    Button {
                         text <=> output_dir;
-                        placeholder-text: "./zoom_downloads";
+                        clicked => { root.request_dir_pick(); }
                     }
                 }
 
                 Row {
-                    Text { text: "Concurrency:"; }
+                    Text { text: "Threads:"; }
                     SpinBox {
                         value <=> concurrency;
                         minimum: 1;
@@ -223,7 +223,7 @@ export component AppWindow inherits Window {
 
                     for recording[index] in recordings: Rectangle {
                         height: 40px;
-                        background: Math.mod(index, 2) == 0 ? #fff : #f9f9f9;
+//                        background: Math.mod(index, 2) == 0 ? #fff : #f9f9f9;
                         border-radius: 4px;
 
                         HorizontalBox {
