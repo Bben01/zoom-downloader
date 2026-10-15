@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Zoom Bulk Download Tool
+Zoom Bulk Download Tool (with meeting-level deletion)
 
 Download Zoom cloud recordings in bulk with resume support.
+After a successful MP4 download for a meeting, the script can delete the
+entire meeting's cloud recordings (all files for the meeting) unless the
+meeting is younger than --min-delete-age-days.
 
 Requirements:
   pip install requests tqdm msgspec
@@ -13,7 +16,7 @@ Environment variables (preferred):
   ZOOM_CLIENT_SECRET
 
 Usage:
-  python download.py --from 2025-01-01 --to 2025-01-10 --out ./downloads
+  python download.py --from 2025-01-01 --to 2025-01-10 --out ./downloads --delete-after --min-delete-age-days 7
 """
 import argparse
 import base64
@@ -21,10 +24,11 @@ import json
 import pathlib
 import datetime
 import logging
+import os
 import signal
-import sys
+import urllib.parse
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple, Set
 
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,12 +49,14 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 class ZoomRecord(msgspec.Struct):
-    """Represents a single Zoom recording."""
+    """Represents a single Zoom recording file (we filter MP4s)."""
     title: str
     topic: str
-    date: str
+    date: str  # "YYYY-MM-DD"
     download_url: str
     file_size: int = 0
+    meeting_id: str = ""     # meeting id or uuid (string)
+    recording_id: str = ""   # file id
 
     def __hash__(self):
         return hash(self.download_url)
@@ -62,15 +68,19 @@ class ZoomRecord(msgspec.Struct):
 @dataclass
 class DownloadResult:
     """Result of a download attempt."""
-    status: str  # ok, skipped, error, exception, no_url
+    status: str  # ok, skipped, error, exception, no_url, cancelled
     title: str
     path: Optional[str] = None
     error: Optional[str] = None
     timestamp: str = None
+    meeting_id: Optional[str] = None
+    recording_id: Optional[str] = None
+    date: Optional[str] = None  # recording/meeting date YYYY-MM-DD
+    delete_status: Optional[str] = None  # deleted_meeting, delete_failed:..., protected_by_min_age_...
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.datetime.now(datetime.UTC).isoformat()
+            self.timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     def to_dict(self):
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -151,8 +161,8 @@ class ZoomClient:
         self._token = r.json()["access_token"]
         return self._token
 
-    def list_recordings(self, start_date: str, end_date: str, user_id: Optional[str] = None) -> set[ZoomRecord]:
-        """List all recordings in date range."""
+    def list_recordings(self, start_date: str, end_date: str, user_id: Optional[str] = None) -> Set[ZoomRecord]:
+        """List all recordings in date range (returns MP4 files only)."""
         if user_id:
             url = f"{self.API_BASE}/users/{user_id}/recordings"
         else:
@@ -160,35 +170,26 @@ class ZoomClient:
 
         return self._paginate_recordings(url, start_date, end_date)
 
-    def _paginate_recordings(self, url: str, start_date: str, end_date: str) -> set[ZoomRecord]:
-        """Paginate through all recordings, splitting date ranges if necessary."""
-        # Zoom API limits to 30 days per request, so split if needed
+    def _paginate_recordings(self, url: str, start_date: str, end_date: str) -> Set[ZoomRecord]:
+        """Paginate through all recordings, splitting date ranges if necessary (30-day limit)."""
         start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
         end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
 
-        recordings = set()
+        recordings: Set[ZoomRecord] = set()
         current_start = start
 
         while current_start <= end:
-            # Process in 30-day chunks
             current_end = min(current_start + datetime.timedelta(days=29), end)
-
             logger.info(f"Fetching recordings from {current_start} to {current_end}")
-            chunk_recordings = self._fetch_recordings_page(
-                url,
-                current_start.isoformat(),
-                current_end.isoformat()
-            )
-            recordings.update(chunk_recordings)
-
-            # Move to next chunk
+            chunk = self._fetch_recordings_page(url, current_start.isoformat(), current_end.isoformat())
+            recordings.update(chunk)
             current_start = current_end + datetime.timedelta(days=1)
 
         return recordings
 
-    def _fetch_recordings_page(self, url: str, start_date: str, end_date: str) -> set[ZoomRecord]:
+    def _fetch_recordings_page(self, url: str, start_date: str, end_date: str) -> Set[ZoomRecord]:
         """Fetch recordings for a single date range (max 30 days)."""
-        recordings = set()
+        recordings: Set[ZoomRecord] = set()
         params = {"from": start_date, "to": end_date, "page_size": 300}
         headers = {"Authorization": f"Bearer {self.get_token()}"}
         next_token = ""
@@ -204,24 +205,51 @@ class ZoomClient:
             for meeting in j.get("meetings", []):
                 topic = meeting.get("topic", "").strip()
                 start_time = meeting.get("start_time")
+                # parse to date (Zoom timestamps usually end with Z)
                 date = datetime.datetime.fromisoformat(start_time.replace("Z", "+00:00")).date().isoformat()
                 title = f"{topic} - {date}"
+                meeting_id = str(meeting.get("uuid") or "")
 
                 for f in meeting.get("recording_files", []):
                     if f.get("file_extension") == "MP4":
-                        recordings.add(ZoomRecord(
+                        rec = ZoomRecord(
                             title=title,
                             topic=topic,
                             date=date,
                             download_url=f["download_url"],
-                            file_size=f.get("file_size", 0)
-                        ))
+                            file_size=f.get("file_size", 0),
+                            meeting_id=meeting_id,
+                            recording_id=str(f.get("id", ""))
+                        )
+                        recordings.add(rec)
 
             next_token = j.get("next_page_token") or ""
             if not next_token:
                 break
 
         return recordings
+
+    def delete_meeting_recordings(self, meeting_id: str) -> Tuple[bool, Optional[str]]:
+        """Delete all recording files for a meeting.
+        Calls DELETE /meetings/{meetingId}/recordings
+        Returns (success, error_message).
+        """
+        if not meeting_id:
+            return False, "missing meeting_id"
+
+        q_meeting = urllib.parse.quote(str(meeting_id), safe='')
+        q_meeting = urllib.parse.quote(str(q_meeting), safe='')
+        url = f"{self.API_BASE}/meetings/{q_meeting}/recordings"
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+
+        try:
+            r = requests.delete(url, headers=headers, timeout=30)
+            if r.status_code in (200, 204):
+                return True, None
+            else:
+                return False, f"HTTP {r.status_code}: {r.text[:500]}"
+        except Exception as e:
+            return False, str(e)
 
 
 # ============================================================================
@@ -251,10 +279,8 @@ class DownloadManager:
         if not recordings:
             return []
 
-        # Calculate total size from file_size field
         total_bytes = sum(rec.file_size for rec in recordings)
-
-        results = []
+        results: list[DownloadResult] = []
         pbar = tqdm(total=total_bytes, desc="Downloading", unit="B", unit_scale=True, unit_divisor=1024)
 
         try:
@@ -263,7 +289,7 @@ class DownloadManager:
 
                 for future in as_completed(futures):
                     if self._shutdown:
-                        # Cancel all pending futures immediately
+                        # Cancel pending futures and stop
                         for f in futures:
                             f.cancel()
                         executor.shutdown(wait=False, cancel_futures=True)
@@ -276,36 +302,37 @@ class DownloadManager:
         return results
 
     def _download_one(self, rec: ZoomRecord, pbar: tqdm) -> DownloadResult:
-        """Download a single recording."""
+        """Download a single recording file (MP4)."""
         tmp_path = None
         try:
             if self._shutdown:
-                return DownloadResult(status="cancelled", title=rec.title)
+                return DownloadResult(status="cancelled", title=rec.title,
+                                      meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
 
             if not rec.download_url:
-                return DownloadResult(status="no_url", title=rec.title)
+                return DownloadResult(status="no_url", title=rec.title,
+                                      meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
 
             # Build filename
             fname = self._safe_filename(f"{rec.title}.mp4")
             out_path = self.out_dir / fname
             tmp_path = self.out_dir / f"{fname}.tmp"
 
-            # Download to temp file first
             headers = {"Authorization": f"Bearer {self.token}"}
 
-            # Try header authentication first
+            # Try header authentication
             with self.session.get(rec.download_url, headers=headers, stream=True, timeout=60) as r:
                 if r.status_code == 200 and r.headers.get("content-type", "").startswith(
                     ("video", "application/octet-stream", "application/")):
                     self._write_stream(r, tmp_path, pbar)
                     if self._shutdown:
-                        # Clean up partial download
                         if tmp_path.exists():
                             tmp_path.unlink()
-                        return DownloadResult(status="cancelled", title=rec.title)
-                    # Move from temp to final location
+                        return DownloadResult(status="cancelled", title=rec.title,
+                                              meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
                     tmp_path.rename(out_path)
-                    return DownloadResult(status="ok", title=rec.title, path=str(out_path))
+                    return DownloadResult(status="ok", title=rec.title, path=str(out_path),
+                                          meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
 
             # Try query param fallback
             sep = "&" if "?" in rec.download_url else "?"
@@ -315,17 +342,18 @@ class DownloadManager:
                 if r.status_code == 200:
                     self._write_stream(r, tmp_path, pbar)
                     if self._shutdown:
-                        # Clean up partial download
                         if tmp_path.exists():
                             tmp_path.unlink()
-                        return DownloadResult(status="cancelled", title=rec.title)
-                    # Move from temp to final location
+                        return DownloadResult(status="cancelled", title=rec.title,
+                                              meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
                     tmp_path.rename(out_path)
-                    return DownloadResult(status="ok", title=rec.title, path=str(out_path))
+                    return DownloadResult(status="ok", title=rec.title, path=str(out_path),
+                                          meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
                 else:
                     error_msg = f"HTTP {r.status_code}: {r.text[:500]}"
                     logger.error(f"Failed to download {rec.title}: {error_msg}")
-                    return DownloadResult(status="error", title=rec.title, error=error_msg)
+                    return DownloadResult(status="error", title=rec.title, error=error_msg,
+                                          meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
 
         except Exception as e:
             # Clean up partial download on exception
@@ -335,16 +363,16 @@ class DownloadManager:
                 except Exception:
                     pass
             logger.error(f"Exception downloading {rec.title}: {e}")
-            return DownloadResult(status="exception", title=rec.title, error=str(e))
+            return DownloadResult(status="exception", title=rec.title, error=str(e),
+                                  meeting_id=rec.meeting_id, recording_id=rec.recording_id, date=rec.date)
 
     def _write_stream(self, resp, out_path: pathlib.Path, pbar: tqdm):
         """Write HTTP response stream to file with byte-level progress tracking."""
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(out_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1 << 20):  # 1MB chunks
+            for chunk in resp.iter_content(chunk_size=1 << 20):  # 1MB
                 if self._shutdown:
-                    # Stop writing immediately on interrupt
                     raise InterruptedError("Download interrupted")
                 if chunk:
                     f.write(chunk)
@@ -362,21 +390,9 @@ class DownloadManager:
 # ============================================================================
 
 def parse_args():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Bulk download Zoom cloud recordings",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Download last 7 days
-  python download.py --from 2025-01-01 --to 2025-01-07
-
-  # Download with custom output directory and concurrency
-  python download.py --out ~/zoom_backups --concurrency 8
-
-  # Download for specific user
-  python download.py --user me
-        """
     )
 
     parser.add_argument("--from", "-f", dest="start", help="Start date (YYYY-MM-DD)")
@@ -385,32 +401,42 @@ Examples:
     parser.add_argument("--concurrency", "-c", type=int, default=4, help="Concurrent downloads (default: 4)")
     parser.add_argument("--user", "-u", dest="user_id", default="me", help="User email or 'me' for user-level listing")
     parser.add_argument("--days", "-d", type=int, default=7, help="Number of days to look back if no dates specified (default: 7)")
+    parser.add_argument("--delete-after", "-D", action="store_true", help="Delete entire meeting recordings after successful MP4 download")
+    parser.add_argument("--min-delete-age-days", "-K", type=int, default=10,
+                        help="Do not delete meetings younger than this many days (default: 10)")
 
     return parser.parse_args()
 
 
 def main():
-    """Main application entry point."""
     args = parse_args()
 
-    # Load credentials
-    account_id = "***REMOVED***"  # TODO: os.getenv("ZOOM_ACCOUNT_ID")
-    client_id = "***REMOVED***"  # TODO: os.getenv("ZOOM_CLIENT_ID")
-    client_secret = "***REMOVED***"  # TODO: os.getenv("ZOOM_CLIENT_SECRET")
+    # Load credentials: env vars first, then zoom-credentials.json next to this script
+    file_creds = {}
+    creds_path = pathlib.Path(__file__).resolve().parent / "zoom-credentials.json"
+    if creds_path.is_file():
+        file_creds = json.loads(creds_path.read_text())
+    account_id = os.getenv("ZOOM_ACCOUNT_ID") or file_creds.get("account_id")
+    client_id = os.getenv("ZOOM_CLIENT_ID") or file_creds.get("client_id")
+    client_secret = os.getenv("ZOOM_CLIENT_SECRET") or file_creds.get("client_secret")
 
     if not all([account_id, client_id, client_secret]):
-        logger.error("Error: Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET")
+        logger.error("Error: Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET or create zoom-credentials.json")
         return 1
 
     # Set date range
     if not args.start:
-        args.start = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=args.days)).strftime("%Y-%m-%d")
+        args.start = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days)).strftime("%Y-%m-%d")
     if not args.end:
-        args.end = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
+        args.end = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
-    logger.info(f"Zoom Download Tool")
+    logger.info("Zoom Download Tool")
     logger.info(f"Date range: {args.start} to {args.end}")
     logger.info(f"Output: {args.out}")
+    if args.delete_after:
+        logger.info("DELETE AFTER DOWNLOAD: enabled (will attempt to delete entire meeting recordings after successful MP4 download)")
+    if args.min_delete_age_days:
+        logger.info(f"Will protect meetings younger than {args.min_delete_age_days} days from deletion")
 
     # Initialize components
     client = ZoomClient(account_id, client_id, client_secret)
@@ -441,20 +467,59 @@ def main():
 
     logger.info(f"Downloading {len(to_download)} new recordings...")
 
-    # Download
     manager = DownloadManager(client.get_token(), args.out, args.concurrency)
     results = manager.download_batch(to_download)
 
-    # Update report only with successful downloads (exclude cancelled ones)
+    # After a successful MP4 download, attempt to delete the entire meeting (unless protected by age)
+    now_date = datetime.datetime.now(datetime.timezone.utc).date()
+    min_days = args.min_delete_age_days or 0
+
+    for result in results:
+        if result.status != "ok":
+            continue
+
+        if not args.delete_after:
+            continue
+
+        # Determine protection by meeting date (safe fallback: protect when parsing fails)
+        protected = False
+        if result.date:
+            try:
+                rec_date = datetime.date.fromisoformat(result.date)
+                age_days = (now_date - rec_date).days
+                if age_days < min_days:
+                    result.delete_status = f"protected_by_min_age_{min_days}d"
+                    protected = True
+            except Exception:
+                # conservative: protect if we can't parse the date
+                result.delete_status = "protected_by_min_age_parse_error"
+                protected = True
+        else:
+            result.delete_status = "protected_no_date"
+            protected = True
+
+        if protected:
+            logger.info(f"Skipping deletion for protected meeting: {result.title} ({result.meeting_id})")
+            continue
+
+        # Attempt to delete all recording files for the meeting
+        success, err = client.delete_meeting_recordings(result.meeting_id or "")
+        if success:
+            result.delete_status = "deleted_meeting"
+            logger.info(f"Deleted meeting recordings: {result.title} ({result.meeting_id})")
+        else:
+            result.delete_status = f"delete_failed: {err}"
+            logger.warning(f"Failed to delete meeting {result.title} ({result.meeting_id}): {err}")
+
+    # Update report only with non-cancelled downloads
     for result in results:
         if result.status != "cancelled":
             report.add_result(result)
     report.save(report_path)
 
-    # Print summary
     stats = report.get_stats(results)
     logger.info("=" * 60)
-    logger.info(f"Download Summary:")
+    logger.info("Download Summary:")
     logger.info(f"  Success: {stats['success']}")
     logger.info(f"  Errors: {stats['errors']}")
     logger.info(f"  Total in history: {stats['total_in_report']}")

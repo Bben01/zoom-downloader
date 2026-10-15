@@ -1,0 +1,160 @@
+export struct Ymd {
+    year: int,
+    month: int,
+    day: int,
+}
+
+export struct MeetingItem {
+    selected: bool,
+    topic: string,
+    date: string,
+    time: string,
+    duration: string,
+    files: int,
+    size: string,
+    // ready | downloaded | queued | downloading | done | deleted | failed | cancelled
+    status: string,
+    status-label: string,
+    progress: float,
+    detail: string,
+    can-open: bool,
+}
+
+export struct LogItem {
+    time: string,
+    // 0 = info, 1 = warning, 2 = error
+    level: int,
+    message: string,
+}
+
+export global Theme {
+    out property <color> bg: #0d1015;
+    out property <color> sidebar: #11151b;
+    out property <color> surface: #161a21;
+    out property <color> surface-hover: #1b2029;
+    out property <color> surface-2: #1f252e;
+    out property <color> border: #242a34;
+    out property <color> border-strong: #323946;
+    out property <color> text: #e9edf3;
+    out property <color> muted: #9aa4b2;
+    out property <color> dim: #687286;
+    out property <color> accent: #2d8cff;
+    out property <color> accent-hover: #4b9dff;
+    out property <color> accent-2: #6a5cff;
+    out property <color> success: #34d399;
+    out property <color> warning: #fbbf24;
+    out property <color> danger: #f87171;
+    out property <color> violet: #a78bfa;
+    out property <length> radius: 10px;
+    out property <length> radius-lg: 14px;
+}
+
+export global Fmt {
+    public pure function two(n: int) -> string {
+        return n < 10 ? "0" + n : "" + n;
+    }
+
+    public pure function nice(d: Ymd) -> string {
+        return two(d.day) + " " + ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.month - 1] + " " + d.year;
+    }
+
+    public pure function status-color(s: string) -> color {
+        if (s == "done" || s == "downloaded") {
+            return Theme.success;
+        }
+        if (s == "deleted") {
+            return Theme.violet;
+        }
+        if (s == "failed") {
+            return Theme.danger;
+        }
+        if (s == "cancelled") {
+            return Theme.warning;
+        }
+        if (s == "downloading" || s == "queued") {
+            return Theme.accent;
+        }
+        return Theme.muted;
+    }
+}
+
+export global AppState {
+    in property <string> version;
+    in-out property <int> page: 0;
+
+    // Date range
+    in-out property <Ymd> from-date: { year: 2026, month: 1, day: 1 };
+    in-out property <Ymd> to-date: { year: 2026, month: 1, day: 31 };
+    // Days of the highlighted quick range; -1 = this year, 0 = custom dates
+    in-out property <int> active-preset;
+
+    // Recordings list
+    in property <[MeetingItem]> meetings;
+    in property <string> list-summary: "Choose a date range and fetch your cloud recordings.";
+    in property <bool> has-fetched;
+    in property <bool> fetching;
+    in property <string> fetch-status;
+    in property <int> selected-count;
+    in property <string> selected-size: "0 B";
+    in property <bool> all-selected;
+    in property <int> done-count;
+    in property <int> failed-count;
+    in property <int> deleted-count;
+    // Selected meetings that are on disk and still in the cloud
+    in property <int> trashable-count;
+
+    // Current run
+    in property <bool> running;
+    in property <bool> stopping;
+    in property <bool> trashing;
+    in property <float> overall-progress;
+    in property <string> progress-label: "Idle";
+    in property <string> speed;
+    in property <string> eta;
+
+    // Settings
+    in-out property <string> account-id;
+    in-out property <string> client-id;
+    in-out property <string> client-secret;
+    in-out property <string> user-id: "me";
+    in-out property <string> output-dir;
+    in-out property <int> concurrency: 3;
+    in-out property <bool> delete-after;
+    in-out property <int> min-age-days: 7;
+    in property <bool> credentials-missing: true;
+    // 0 = untested, 1 = testing, 2 = ok, 3 = error
+    in property <int> connection-state;
+    in property <string> connection-message;
+
+    // Activity log
+    in property <[LogItem]> logs;
+    in property <int> unseen-errors;
+
+    // Toast: kind 0 = info, 1 = success, 2 = error
+    in property <string> toast-text;
+    in property <int> toast-kind;
+    in property <bool> toast-visible;
+
+    // Confirmation dialog
+    in-out property <bool> confirm-visible;
+    in property <string> confirm-title;
+    in property <string> confirm-text;
+    in property <string> confirm-button;
+
+    callback fetch();
+    callback start();
+    callback confirmed();
+    callback trash-selected();
+    callback stop();
+    callback toggle(int);
+    callback select-all(bool);
+    callback preset(int);
+    callback pick-folder();
+    callback open-folder();
+    callback open-item(int);
+    callback save-settings();
+    callback test-connection();
+    callback clear-logs();
+    callback open-log-file();
+    callback page-changed(int);
+}

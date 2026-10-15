@@ -1,257 +1,1019 @@
-import { Button, LineEdit, SpinBox, CheckBox, VerticalBox, HorizontalBox, ScrollView, GridBox, GroupBox, DatePickerPopup } from "std-widgets.slint";
+import { LineEdit, SpinBox, Switch, ListView, ScrollView, DatePickerPopup } from "std-widgets.slint";
+import { Theme, Fmt, AppState, MeetingItem, LogItem, Ymd } from "globals.slint";
+import { Icon, Btn, IconButton, Card, Field, NavItem, Tick, Pill, Bar, Stat, Chip, DateField, MeetingRow } from "components.slint";
 
-export struct Recording {
-    title: string,
-    date: string,
-    size: string,
-}
+export { AppState, MeetingItem, LogItem, Ymd }
 
-export struct DownloadStats {
-    total: int,
-    completed: int,
-    failed: int,
-    progress: float,
-}
+component PageHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    spacing: 10px;
 
-component ProgressBar inherits Rectangle {
-    in property <float> progress: 0.0; // 0.0 to 1.0
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 4px;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: 24px;
+            font-weight: 700;
+        }
 
-    height: 24px;
-    border-radius: 4px;
-    background: #e0e0e0;
-
-    Rectangle {
-        x: 0;
-        width: parent.width * progress;
-        height: parent.height;
-        border-radius: parent.border-radius;
-        background: #4CAF50;
+        Text {
+            text: root.subtitle;
+            color: Theme.muted;
+            font-size: 13px;
+            overflow: elide;
+        }
     }
 
-    Text {
-        text: Math.round(progress * 100) + "%";
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        color: progress > 0.5 ? #fff : #000;
+    @children
+}
+
+component RecordingsPage inherits Rectangle {
+    VerticalLayout {
+        padding: 28px;
+        padding-top: 26px;
+        spacing: 18px;
+
+        PageHeader {
+            title: "Recordings";
+            subtitle: AppState.fetching ? AppState.fetch-status : AppState.list-summary;
+
+            VerticalLayout {
+                alignment: center;
+                Btn {
+                    kind: 1;
+                    icon: @image-url("icons/folder.svg");
+                    text: "Open folder";
+                    clicked => {
+                        AppState.open-folder();
+                    }
+                }
+            }
+        }
+
+        if AppState.credentials-missing: Rectangle {
+            height: 52px;
+            border-radius: Theme.radius;
+            background: Theme.warning.with-alpha(0.09);
+            border-width: 1px;
+            border-color: Theme.warning.with-alpha(0.3);
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 8px;
+                spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/lock.svg");
+                        tint: Theme.warning;
+                    }
+                }
+
+                Text {
+                    text: "Add your Zoom API credentials to get started.";
+                    color: Theme.text;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Btn {
+                        kind: 2;
+                        text: "Open settings →";
+                        clicked => {
+                            AppState.page = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Card {
+            inner-padding: 16px;
+            HorizontalLayout {
+                spacing: 10px;
+
+                DateField {
+                    label: "FROM";
+                    value: Fmt.nice(AppState.from-date);
+                    enabled: !AppState.fetching && !AppState.running;
+                    clicked => {
+                        from-picker.show();
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "→";
+                        color: Theme.dim;
+                        font-size: 16px;
+                    }
+                }
+
+                DateField {
+                    label: "TO";
+                    value: Fmt.nice(AppState.to-date);
+                    enabled: !AppState.fetching && !AppState.running;
+                    clicked => {
+                        to-picker.show();
+                    }
+                }
+
+                Rectangle {
+                    width: 6px;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        Chip {
+                            text: "7 days";
+                            active: AppState.active-preset == 7;
+                            enabled: !AppState.fetching && !AppState.running;
+                            clicked => {
+                                AppState.preset(7);
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Chip {
+                            text: "30 days";
+                            active: AppState.active-preset == 30;
+                            enabled: !AppState.fetching && !AppState.running;
+                            clicked => {
+                                AppState.preset(30);
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Chip {
+                            text: "3 months";
+                            active: AppState.active-preset == 90;
+                            enabled: !AppState.fetching && !AppState.running;
+                            clicked => {
+                                AppState.preset(90);
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Chip {
+                            text: "This year";
+                            active: AppState.active-preset == -1;
+                            enabled: !AppState.fetching && !AppState.running;
+                            clicked => {
+                                AppState.preset(-1);
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Btn {
+                        icon: @image-url("icons/refresh.svg");
+                        text: AppState.fetching ? "Fetching…" : "Fetch recordings";
+                        enabled: !AppState.fetching && !AppState.running;
+                        clicked => {
+                            AppState.fetch();
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 14px;
+            Stat {
+                icon: @image-url("icons/video.svg");
+                value: AppState.meetings.length;
+                label: "Meetings found";
+                accent: Theme.accent;
+            }
+
+            Stat {
+                icon: @image-url("icons/check.svg");
+                value: AppState.selected-count;
+                label: "Selected · " + AppState.selected-size;
+                accent: Theme.accent-2;
+            }
+
+            Stat {
+                icon: @image-url("icons/download.svg");
+                value: AppState.done-count;
+                label: AppState.deleted-count > 0 ? "Downloaded · " + AppState.deleted-count + " trashed" : "Downloaded";
+                accent: Theme.success;
+            }
+
+            Stat {
+                icon: @image-url("icons/alert.svg");
+                value: AppState.failed-count;
+                label: "Failed";
+                accent: AppState.failed-count > 0 ? Theme.danger : Theme.dim;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 180px;
+            background: Theme.surface;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 44px;
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 14px;
+                        spacing: 14px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            Tick {
+                                checked: AppState.all-selected;
+                                partial: AppState.selected-count > 0;
+                                enabled: AppState.meetings.length > 0 && !AppState.running;
+                                toggled => {
+                                    AppState.select-all(!AppState.all-selected);
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 38px;
+                        }
+
+                        Text {
+                            text: "MEETING";
+                            color: Theme.dim;
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Text {
+                            text: "SIZE";
+                            width: 84px;
+                            color: Theme.dim;
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                        }
+
+                        Text {
+                            text: "STATUS";
+                            width: 170px;
+                            color: Theme.dim;
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            width: 32px;
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                }
+
+                if AppState.meetings.length == 0: VerticalLayout {
+                    alignment: center;
+                    spacing: 10px;
+                    vertical-stretch: 1;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 68px;
+                            height: 68px;
+                            border-radius: 20px;
+                            background: Theme.accent.with-alpha(0.1);
+                            Icon {
+                                source: AppState.fetching ? @image-url("icons/refresh.svg") : @image-url("icons/video.svg");
+                                tint: Theme.accent;
+                                width: 28px;
+                                height: 28px;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: AppState.fetching ? "Looking for recordings…" : AppState.has-fetched ? "No recordings in this date range" : "No recordings loaded yet";
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 650;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: AppState.fetching ? AppState.fetch-status : "Pick a date range above, then press Fetch recordings.";
+                        color: Theme.muted;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                if AppState.meetings.length > 0: ListView {
+                    vertical-stretch: 1;
+                    for item[i] in AppState.meetings: MeetingRow {
+                        item: item;
+                        interactive: !AppState.running;
+                        toggle => {
+                            AppState.toggle(i);
+                        }
+                        open => {
+                            AppState.open-item(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 78px;
+            background: Theme.surface;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 16px;
+                spacing: 20px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        spacing: 14px;
+                        Text {
+                            text: AppState.progress-label;
+                            color: Theme.text;
+                            font-size: 13px;
+                            font-weight: 600;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+
+                        Text {
+                            text: AppState.speed;
+                            color: Theme.muted;
+                            font-size: 12px;
+                        }
+
+                        Text {
+                            text: AppState.eta;
+                            color: Theme.dim;
+                            font-size: 12px;
+                        }
+                    }
+
+                    Bar {
+                        value: AppState.overall-progress;
+                        height: 8px;
+                        tone: !AppState.running && AppState.failed-count > 0 ? Theme.warning : Theme.accent;
+                        tone-end: !AppState.running && AppState.failed-count > 0 ? Theme.danger : Theme.accent-2;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    if !AppState.running: HorizontalLayout {
+                        spacing: 10px;
+                        if AppState.trashable-count > 0: Btn {
+                            kind: 1;
+                            icon: @image-url("icons/trash.svg");
+                            text: "Move " + AppState.trashable-count + " to Zoom trash";
+                            enabled: !AppState.fetching;
+                            clicked => {
+                                AppState.trash-selected();
+                            }
+                        }
+
+                        Btn {
+                            icon: @image-url("icons/download.svg");
+                            text: AppState.selected-count > 0 ? "Download " + AppState.selected-count + " selected" : "Download";
+                            enabled: AppState.selected-count > 0 && !AppState.fetching;
+                            clicked => {
+                                AppState.start();
+                            }
+                        }
+                    }
+
+                    if AppState.running: Btn {
+                        kind: 3;
+                        icon: @image-url("icons/stop.svg");
+                        text: AppState.stopping ? "Stopping…" : "Stop";
+                        enabled: !AppState.stopping;
+                        clicked => {
+                            AppState.stop();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    from-picker := DatePickerPopup {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        title: "From";
+        date: { year: AppState.from-date.year, month: AppState.from-date.month, day: AppState.from-date.day };
+        accepted(d) => {
+            AppState.from-date = { year: d.year, month: d.month, day: d.day };
+            AppState.active-preset = 0;
+            self.close();
+        }
+        canceled => {
+            self.close();
+        }
+    }
+
+    to-picker := DatePickerPopup {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        title: "To";
+        date: { year: AppState.to-date.year, month: AppState.to-date.month, day: AppState.to-date.day };
+        accepted(d) => {
+            AppState.to-date = { year: d.year, month: d.month, day: d.day };
+            AppState.active-preset = 0;
+            self.close();
+        }
+        canceled => {
+            self.close();
+        }
+    }
+}
+
+component SettingsPage inherits Rectangle {
+    sv := ScrollView {
+        width: parent.width;
+        height: parent.height;
+        viewport-width: self.visible-width;
+        viewport-height: content.preferred-height;
+
+        content := VerticalLayout {
+            width: sv.visible-width;
+            padding: 28px;
+            padding-top: 26px;
+            spacing: 18px;
+            alignment: start;
+
+            PageHeader {
+                title: "Settings";
+                subtitle: "Your client secret is kept in the system credential store, never in plain text.";
+            }
+
+            Card {
+                title: "Zoom API credentials";
+                subtitle: "Create a Server-to-Server OAuth app at marketplace.zoom.us with permission to list recordings (and delete them, if you use cloud cleanup), then copy its keys here.";
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    Field {
+                        label: "Account ID";
+                        LineEdit {
+                            text <=> AppState.account-id;
+                            placeholder-text: "Account ID";
+                        }
+                    }
+
+                    Field {
+                        label: "Client ID";
+                        LineEdit {
+                            text <=> AppState.client-id;
+                            placeholder-text: "Client ID";
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    Field {
+                        label: "Client secret";
+                        LineEdit {
+                            text <=> AppState.client-secret;
+                            input-type: password;
+                            placeholder-text: "Client secret";
+                        }
+                    }
+
+                    Field {
+                        label: "Zoom user";
+                        LineEdit {
+                            text <=> AppState.user-id;
+                            placeholder-text: "me  or  someone@example.com";
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+                    Btn {
+                        kind: 1;
+                        icon: @image-url("icons/bolt.svg");
+                        text: AppState.connection-state == 1 ? "Testing…" : "Test connection";
+                        enabled: AppState.connection-state != 1;
+                        clicked => {
+                            AppState.test-connection();
+                        }
+                    }
+
+                    if AppState.connection-state >= 2: VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            text: AppState.connection-message;
+                            tone: AppState.connection-state == 2 ? Theme.success : Theme.danger;
+                        }
+                    }
+                }
+            }
+
+            Card {
+                title: "Downloads";
+
+                Field {
+                    label: "Save recordings to";
+                    HorizontalLayout {
+                        spacing: 10px;
+                        LineEdit {
+                            text <=> AppState.output-dir;
+                            horizontal-stretch: 1;
+                        }
+
+                        Btn {
+                            kind: 1;
+                            icon: @image-url("icons/folder.svg");
+                            text: "Browse…";
+                            clicked => {
+                                AppState.pick-folder();
+                            }
+                        }
+                    }
+                }
+
+                Field {
+                    label: "Parallel downloads";
+                    hint: "How many videos download at the same time. 2–4 is usually the sweet spot.";
+                    HorizontalLayout {
+                        alignment: start;
+                        SpinBox {
+                            width: 160px;
+                            value <=> AppState.concurrency;
+                            minimum: 1;
+                            maximum: 8;
+                        }
+                    }
+                }
+            }
+
+            Card {
+                title: "Cloud cleanup";
+
+                HorizontalLayout {
+                    spacing: 16px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+                        Text {
+                            text: "Move meetings to the Zoom trash after downloading";
+                            color: Theme.text;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: "Only happens once every video of a meeting is safely on disk. Zoom keeps trashed recordings for 30 days, so they can still be recovered.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Switch {
+                            checked <=> AppState.delete-after;
+                        }
+                    }
+                }
+
+                Field {
+                    label: "Keep recent meetings (days)";
+                    hint: "Meetings younger than this are never trashed, even when cleanup is on.";
+                    HorizontalLayout {
+                        alignment: start;
+                        SpinBox {
+                            width: 160px;
+                            value <=> AppState.min-age-days;
+                            minimum: 0;
+                            maximum: 3650;
+                            enabled: AppState.delete-after;
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                Btn {
+                    icon: @image-url("icons/check.svg");
+                    text: "Save settings";
+                    clicked => {
+                        AppState.save-settings();
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ActivityPage inherits Rectangle {
+    VerticalLayout {
+        padding: 28px;
+        padding-top: 26px;
+        spacing: 18px;
+
+        PageHeader {
+            title: "Activity";
+            subtitle: "What the app has been doing. A full log is also written to disk.";
+
+            VerticalLayout {
+                alignment: center;
+                Btn {
+                    kind: 1;
+                    icon: @image-url("icons/folder.svg");
+                    text: "Open log file";
+                    clicked => {
+                        AppState.open-log-file();
+                    }
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                Btn {
+                    kind: 2;
+                    icon: @image-url("icons/trash.svg");
+                    text: "Clear";
+                    clicked => {
+                        AppState.clear-logs();
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.surface;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            if AppState.logs.length == 0: Text {
+                text: "Nothing here yet.";
+                color: Theme.dim;
+            }
+
+            ListView {
+                width: parent.width;
+                height: parent.height;
+                for entry in AppState.logs: Rectangle {
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 18px;
+                        padding-top: 9px;
+                        padding-bottom: 9px;
+                        spacing: 14px;
+
+                        Text {
+                            text: entry.time;
+                            color: Theme.dim;
+                            font-size: 12px;
+                            width: 64px;
+                        }
+
+                        VerticalLayout {
+                            alignment: start;
+                            padding-top: 5px;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: entry.level == 2 ? Theme.danger : entry.level == 1 ? Theme.warning : Theme.accent;
+                            }
+                        }
+
+                        Text {
+                            text: entry.message;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                            font-size: 12px;
+                            color: entry.level == 2 ? Theme.danger : entry.level == 1 ? Theme.warning : Theme.text;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 export component AppWindow inherits Window {
-    title: "Zoom Recording Downloader";
-    preferred-width: 900px;
-    preferred-height: 700px;
-    background: #f5f5f5;
+    title: "Zoom Downloader";
+    icon: @image-url("icons/logo.png");
+    preferred-width: 1200px;
+    preferred-height: 780px;
+    min-width: 1000px;
+    min-height: 640px;
+    background: Theme.bg;
+    default-font-size: 13px;
 
-    callback fetch_recordings();
-    callback start_download();
-    callback stop_download();
-    callback update_credentials(string, string, string);
-    callback request_dir_pick();
+    HorizontalLayout {
+        Rectangle {
+            width: 236px;
+            background: Theme.sidebar;
 
-    in-out property <string> start_date: "";
-    in-out property <string> end_date: "";
-    in-out property <string> output_dir: "./zoom_downloads";
-    in-out property <int> concurrency: 4;
-    in-out property <string> status_text: "Ready";
-    in-out property <bool> is_downloading: false;
-    in-out property <bool> is_fetching: false;
-    in-out property <[Recording]> recordings: [];
-    in-out property <DownloadStats> stats: { total: 0, completed: 0, failed: 0, progress: 0.0 };
+            VerticalLayout {
+                padding: 16px;
+                padding-top: 20px;
+                spacing: 6px;
 
-    VerticalBox {
-        padding: 20px;
-        spacing: 15px;
-
-        // Header
-        Text {
-            text: "Zoom Recording Downloader";
-            font-size: 24px;
-            font-weight: 700;
-            color: #2563eb;
-            horizontal-alignment: center;
-        }
-
-        // Date Range and Settings
-        GroupBox {
-            title: "Download Settings";
-
-            GridBox {
-                spacing: 10px;
-
-                Row {
-                    Text { text: "Start Date:"; }
-                    // Button that shows currently selected date (or placeholder) and opens date picker
-                    Button {
-                        text: start_date == "" ? "Select Start Date" : start_date;
-                        clicked => {
-                            start_date_picker.show();
-                        }
+                HorizontalLayout {
+                    padding-left: 4px;
+                    padding-bottom: 22px;
+                    spacing: 12px;
+                    Image {
+                        source: @image-url("icons/logo.png");
+                        width: 38px;
+                        height: 38px;
                     }
 
-                    // DatePickerPopup for start date
-                    start_date_picker := DatePickerPopup {
-                        x: (root.width - self.width) / 2;
-                        y: (root.height - self.height ) / 2;
-                        close-policy: PopupClosePolicy.close-on-click-outside;
-
-                        // accepted provides a Date struct { year, month, day, ... }
-                        accepted(date) => {
-                            // format to YYYY-MM-DD with zero padding
-                            root.start_date = date.year + "-" +
-                                (date.month < 10 ? "0" + date.month : "" + date.month) + "-" +
-                                (date.day < 10 ? "0" + date.day : "" + date.day);
-                            start_date_picker.close();
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 1px;
+                        Text {
+                            text: "Zoom Downloader";
+                            color: Theme.text;
+                            font-size: 15px;
+                            font-weight: 700;
                         }
 
-                        canceled() => {
-                            start_date_picker.close();
+                        Text {
+                            text: "Cloud recordings, offline";
+                            color: Theme.dim;
+                            font-size: 11px;
                         }
                     }
                 }
 
-                Row {
-                    Text { text: "End Date:"; }
-                    Button {
-                        text: end_date == "" ? "Select End Date" : end_date;
-                        clicked => {
-                            end_date_picker.show();
-                        }
-                    }
-
-                    end_date_picker := DatePickerPopup {
-                        x: (root.width - self.width) / 2;
-                        y: (root.height - self.height ) / 2;
-
-                        accepted(date) => {
-                            root.end_date = date.year + "-" +
-                                (date.month < 10 ? "0" + date.month : "" + date.month) + "-" +
-                                (date.day < 10 ? "0" + date.day : "" + date.day);
-                            end_date_picker.close();
-                        }
-
-                        canceled() => {
-                            end_date_picker.close();
-                        }
+                NavItem {
+                    icon: @image-url("icons/video.svg");
+                    text: "Recordings";
+                    active: AppState.page == 0;
+                    badge: AppState.meetings.length > 0 ? "" + AppState.meetings.length : "";
+                    clicked => {
+                        AppState.page = 0;
+                        AppState.page-changed(0);
                     }
                 }
 
-                Row {
-                    Text { text: "Output Directory:"; }
-                    Button {
-                        text <=> output_dir;
-                        clicked => { root.request_dir_pick(); }
+                NavItem {
+                    icon: @image-url("icons/settings.svg");
+                    text: "Settings";
+                    active: AppState.page == 1;
+                    badge: AppState.credentials-missing ? "!" : "";
+                    badge-color: Theme.warning;
+                    clicked => {
+                        AppState.page = 1;
+                        AppState.page-changed(1);
                     }
                 }
 
-                Row {
-                    Text { text: "Threads:"; }
-                    SpinBox {
-                        value <=> concurrency;
-                        minimum: 1;
-                        maximum: 16;
+                NavItem {
+                    icon: @image-url("icons/activity.svg");
+                    text: "Activity";
+                    active: AppState.page == 2;
+                    badge: AppState.unseen-errors > 0 ? "" + AppState.unseen-errors : "";
+                    badge-color: Theme.danger;
+                    clicked => {
+                        AppState.page = 2;
+                        AppState.page-changed(2);
                     }
                 }
-            }
-        }
 
-        // Action Buttons
-        HorizontalBox {
-            spacing: 10px;
-            alignment: center;
-
-            Button {
-                text: "Fetch Recordings";
-                enabled: !is_fetching && !is_downloading;
-                primary: true;
-                clicked => {
-                    root.fetch_recordings();
-                }
-            }
-
-            Button {
-                text: is_downloading ? "Stop Download" : "Start Download";
-                enabled: recordings.length > 0 && !is_fetching;
-                primary: !is_downloading;
-                clicked => {
-                    if (is_downloading) {
-                        root.stop_download();
-                    } else {
-                        root.start_download();
-                    }
-                }
-            }
-        }
-
-        // Status
-        Text {
-            text: status_text;
-            horizontal-alignment: center;
-            font-size: 14px;
-            color: #666;
-        }
-
-        // Progress Section
-        if is_downloading || stats.total > 0: GroupBox {
-            title: "Download Progress";
-
-            VerticalBox {
-                spacing: 10px;
-
-                HorizontalBox {
-                    spacing: 20px;
-
-                    Text { text: "Total: " + stats.total; }
-                    Text { text: "Completed: " + stats.completed; color: #4CAF50; }
-                    Text { text: "Failed: " + stats.failed; color: #f44336; }
+                Rectangle {
+                    vertical-stretch: 1;
                 }
 
-                ProgressBar {
-                    progress: stats.progress;
-                }
-            }
-        }
+                if AppState.running: Rectangle {
+                    vertical-stretch: 0;
+                    background: Theme.surface;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: Theme.border;
 
-        // Recordings List
-        GroupBox {
-            title: "Recordings (" + recordings.length + ")";
-
-            ScrollView {
-                height: 250px;
-
-                VerticalBox {
-                    spacing: 5px;
-
-                    for recording[index] in recordings: Rectangle {
-                        height: 40px;
-//                        background: Math.mod(index, 2) == 0 ? #fff : #f9f9f9;
-                        border-radius: 4px;
-
-                        HorizontalBox {
-                            padding: 10px;
-                            spacing: 10px;
-
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 9px;
+                        HorizontalLayout {
                             Text {
-                                text: recording.title;
-                                horizontal-stretch: 2;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: recording.date;
+                                text: AppState.stopping ? "Stopping…" : AppState.trashing ? "Moving to trash" : "Downloading";
+                                color: Theme.text;
+                                font-weight: 600;
                                 horizontal-stretch: 1;
-                                vertical-alignment: center;
-                                color: #666;
                             }
 
                             Text {
-                                text: recording.size;
-                                horizontal-stretch: 0;
-                                vertical-alignment: center;
-                                color: #999;
+                                text: Math.round(AppState.overall-progress * 100) + "%";
+                                color: Theme.accent;
+                                font-weight: 700;
                             }
+                        }
+
+                        Bar {
+                            value: AppState.overall-progress;
+                        }
+
+                        Text {
+                            text: AppState.speed;
+                            color: Theme.dim;
+                            font-size: 11px;
                         }
                     }
                 }
+
+                Text {
+                    text: "Version " + AppState.version;
+                    color: Theme.dim;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.border;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+
+            RecordingsPage {
+                width: parent.width;
+                height: parent.height;
+                visible: AppState.page == 0;
+            }
+
+            SettingsPage {
+                width: parent.width;
+                height: parent.height;
+                visible: AppState.page == 1;
+            }
+
+            ActivityPage {
+                width: parent.width;
+                height: parent.height;
+                visible: AppState.page == 2;
+            }
+        }
+    }
+
+    if AppState.confirm-visible: Rectangle {
+        width: root.width;
+        height: root.height;
+        background: #000000a8;
+
+        TouchArea { }
+
+        Rectangle {
+            width: 460px;
+            height: dialog.preferred-height;
+            background: Theme.surface;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 40px;
+            drop-shadow-color: #00000090;
+
+            dialog := VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    Rectangle {
+                        width: 42px;
+                        height: 42px;
+                        border-radius: 11px;
+                        background: Theme.violet.with-alpha(0.14);
+                        Icon {
+                            source: @image-url("icons/trash.svg");
+                            tint: Theme.violet;
+                            width: 20px;
+                            height: 20px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: AppState.confirm-title;
+                            color: Theme.text;
+                            font-size: 17px;
+                            font-weight: 700;
+                        }
+                    }
+                }
+
+                Text {
+                    text: AppState.confirm-text;
+                    color: Theme.muted;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+                    Btn {
+                        kind: 2;
+                        text: "Cancel";
+                        clicked => {
+                            AppState.confirm-visible = false;
+                        }
+                    }
+
+                    Btn {
+                        text: AppState.confirm-button;
+                        clicked => {
+                            AppState.confirm-visible = false;
+                            AppState.confirmed();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    toast := Rectangle {
+        width: min(toast-layout.preferred-width, root.width - 80px);
+        height: 46px;
+        x: (root.width - self.width) / 2;
+        y: AppState.toast-visible ? root.height - self.height - 116px : root.height + 20px;
+        opacity: AppState.toast-visible ? 1 : 0;
+        border-radius: 12px;
+        background: #222933;
+        border-width: 1px;
+        border-color: (AppState.toast-kind == 2 ? Theme.danger : AppState.toast-kind == 1 ? Theme.success : Theme.accent).with-alpha(0.45);
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000080;
+        animate y, opacity { duration: 240ms; easing: ease-out; }
+
+        toast-layout := HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 18px;
+            spacing: 10px;
+
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    source: AppState.toast-kind == 2 ? @image-url("icons/alert.svg") : @image-url("icons/check.svg");
+                    tint: AppState.toast-kind == 2 ? Theme.danger : AppState.toast-kind == 1 ? Theme.success : Theme.accent;
+                    width: 17px;
+                    height: 17px;
+                }
+            }
+
+            Text {
+                text: AppState.toast-text;
+                color: Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
     }

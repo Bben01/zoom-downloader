@@ -1,10 +1,12 @@
 .idea
 .venv
 zoom_downloads
+downloads/
+__pycache__/
 .DS_Store
+zoom-credentials.json
 
-# Rust
+# Rust (Cargo.lock is committed: CI builds with --locked)
 target/
-Cargo.lock
 **/*.rs.bk
 *.pdb

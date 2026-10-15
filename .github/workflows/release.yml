@@ -1,0 +1,110 @@
+name: Build & Release
+
+# Every push/PR builds the Windows app and uploads it as a workflow artifact.
+# When the version in Cargo.toml changes on main (i.e. no tag v<version> exists yet),
+# a GitHub release is published with the Windows binaries attached.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  version:
+    name: Detect version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      release: ${{ steps.meta.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        name: Read version from Cargo.toml
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [[ -z "$version" ]]; then
+            echo "::error::Could not read version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          release=false
+          if [[ "$EVENT" != "pull_request" && "$REF" == "refs/heads/main" ]]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+              echo "Tag v$version already exists, no release."
+            else
+              echo "New version v$version detected, will release."
+              release=true
+            fi
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build Windows x64
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release
+        run: cargo build --locked --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $name = "ZoomDownloader-$env:VERSION-windows-x64"
+          Copy-Item target/release/zoom-downloader.exe "dist/$name.exe"
+          New-Item -ItemType Directory -Force "staging/$name" | Out-Null
+          Copy-Item target/release/zoom-downloader.exe "staging/$name/Zoom Downloader.exe"
+          Copy-Item README.md "staging/$name/README.md"
+          Compress-Archive -Path "staging/$name" -DestinationPath "dist/$name.zip"
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZoomDownloader-${{ env.VERSION }}-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ZoomDownloader-${{ needs.version.outputs.version }}-windows-x64
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Zoom Downloader v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
