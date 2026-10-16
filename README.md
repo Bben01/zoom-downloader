@@ -21,11 +21,30 @@ A desktop app for Windows (it also runs on macOS and Linux) that bulk-downloads 
 
 ## Zoom credentials
 
-1. Go to <https://marketplace.zoom.us/> → *Develop* → *Build App* → **Server-to-Server OAuth**.
-2. Grant scopes that allow **listing cloud recordings**. If you plan to use cloud cleanup, also grant scopes that allow **deleting recordings**. For example, `cloud_recording:read:list_user_recordings:admin` and `cloud_recording:delete:recording_file:admin`, or the classic `recording:read:admin` / `recording:write:admin`.
-3. Activate the app, then copy the **Account ID**, **Client ID** and **Client secret** into *Settings* and press **Test connection**.
+The app needs three keys (Account ID, Client ID, Client secret) from a "Server-to-Server OAuth" app in your Zoom account. It takes about 5 minutes and is done once. The same steps are shown in the app under *Settings → How do I get these keys?*.
 
-The `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID` and `ZOOM_CLIENT_SECRET` environment variables are used as a fallback when a field in Settings is empty.
+You need a paid Zoom plan with cloud recording, and an account role that can add admin-level scopes (usually admin or owner). If you can't select the admin scopes in step 5, ask your Zoom account administrator to grant the permission or to create the app for you.
+
+1. Open <https://marketplace.zoom.us/develop/create> and sign in with the Zoom account that owns the recordings.
+2. Choose **Server-to-Server OAuth app** (if the picker isn't shown, click **Develop** in the lower-left corner, then **+** next to *Developer* → **Build an app**), give it any name (for example "Recording downloader") and click **Create**.
+3. On **App credentials**, copy the **Account ID**, **Client ID** and **Client secret** into *Settings*.
+4. On **Information**, fill in the required fields (short description, company name, developer name and email).
+5. On **Scopes**, click **Add scopes** and add:
+   - `cloud_recording:read:list_user_recordings:admin` — list recordings and download them (classic name: `recording:read:admin`).
+   - For cloud cleanup only: `cloud_recording:delete:meeting_recording:admin` — move a meeting's recordings to the Zoom trash (classic name: `recording:write:admin`).
+6. On **Activation**, click **Activate your app**. It can't issue tokens until it is activated.
+7. For cloud cleanup only: in the Zoom web portal, open **Settings → Recording** and make sure cloud recording and **The host can delete cloud recordings** are enabled.
+8. In the app, press **Test connection**.
+
+If the test says the token "does not contain scopes", go back to step 5. If the client secret is lost, click **Regenerate** on the App credentials page. Never share the client secret. Recordings moved to the Zoom trash can be recovered from the Zoom web portal for up to 30 days.
+
+Instead of typing the keys, you can put a `zoom-credentials.json` file next to the app; it fills any empty credential fields at launch:
+
+```json
+{ "account_id": "...", "client_id": "...", "client_secret": "..." }
+```
+
+The `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID` and `ZOOM_CLIENT_SECRET` environment variables are used as a last fallback.
 
 ## Usage
 

@@ -148,6 +148,7 @@ impl App {
             st.set_unseen_errors(0);
         }));
         on!(on_open_log_file, |a| a.open_log_file());
+        on!(on_open_zoom_marketplace, |a| a.open_zoom_marketplace());
         on!(on_page_changed, |a, p| a.with_ui(|ui| {
             if p == 2 {
                 ui.global::<AppState>().set_unseen_errors(0);
@@ -747,6 +748,12 @@ impl App {
     fn open_log_file(&self) {
         if let Some(p) = settings::log_file() {
             let _ = open::that_detached(p);
+        }
+    }
+
+    fn open_zoom_marketplace(&self) {
+        if let Err(e) = open::that_detached("https://marketplace.zoom.us/develop/create") {
+            self.with_ui(|ui| toast(ui, 2, &format!("Cannot open the browser: {e}")));
         }
     }
 

@@ -89,9 +89,8 @@ fn read_credentials_file() -> Option<FileCredentials> {
 }
 
 pub fn load() -> Settings {
-    let saved = settings_path().and_then(|p| std::fs::read_to_string(p).ok());
-    let first_launch = saved.is_none();
-    let mut s: Settings = saved
+    let mut s: Settings = settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
 
@@ -101,7 +100,7 @@ pub fn load() -> Settings {
         Err(e) => log::warn!("Could not read the client secret from the credential store: {e}"),
     }
 
-    if first_launch {
+    if s.account_id.is_empty() || s.client_id.is_empty() || s.client_secret.is_empty() {
         if let Some(c) = read_credentials_file() {
             let fill = |field: &mut String, value: String| {
                 if field.is_empty() {

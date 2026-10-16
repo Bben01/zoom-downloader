@@ -469,6 +469,8 @@ component RecordingsPage inherits Rectangle {
 }
 
 component SettingsPage inherits Rectangle {
+    property <bool> show-guide: AppState.credentials-missing;
+
     sv := ScrollView {
         width: parent.width;
         height: parent.height;
@@ -489,7 +491,73 @@ component SettingsPage inherits Rectangle {
 
             Card {
                 title: "Zoom API credentials";
-                subtitle: "Create a Server-to-Server OAuth app at marketplace.zoom.us with permission to list recordings (and delete them, if you use cloud cleanup), then copy its keys here.";
+                subtitle: "Three keys from a free \"Server-to-Server OAuth\" app in your Zoom account. It takes about 5 minutes and only has to be done once.";
+
+                if root.show-guide: Rectangle {
+                    background: Theme.accent.with-alpha(0.06);
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: Theme.accent.with-alpha(0.25);
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+
+                        Text {
+                            text: "How to get your keys";
+                            color: Theme.text;
+                            font-size: 13px;
+                            font-weight: 650;
+                        }
+
+                        for step[i] in [
+                            "Click \"Open Zoom Marketplace\" below and sign in with the Zoom account that owns the recordings. You need a paid plan with cloud recording and an admin (or owner) role; otherwise ask your Zoom admin to create the app.",
+                            "Choose \"Server-to-Server OAuth app\" (if it isn't shown, click \"Develop\" in the lower-left corner, then \"+\" next to Developer > \"Build an app\"), give it any name (for example \"Recording downloader\") and click Create.",
+                            "On the \"App credentials\" page, copy the Account ID, Client ID and Client secret into the boxes below.",
+                            "On the \"Information\" page, fill in the required fields (short description, company name, developer name and email).",
+                            "On the \"Scopes\" page, click \"Add scopes\" and add cloud_recording:read:list_user_recordings:admin (classic: recording:read:admin). To move meetings to the Zoom trash after downloading, also add cloud_recording:delete:meeting_recording:admin (classic: recording:write:admin).",
+                            "On the \"Activation\" page, click \"Activate your app\".",
+                            "Only for moving to trash: in the Zoom web portal, open Settings > Recording and make sure \"The host can delete cloud recordings\" is enabled. Trashed recordings can be recovered for up to 30 days.",
+                            "Come back here and press \"Test connection\".",
+                        ]: HorizontalLayout {
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    width: 20px;
+                                    height: 20px;
+                                    border-radius: 10px;
+                                    background: Theme.accent.with-alpha(0.18);
+                                    Text {
+                                        text: "" + (i + 1);
+                                        color: Theme.accent;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: step;
+                                color: Theme.text;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: start;
+                            padding-top: 4px;
+                            Btn {
+                                text: "Open Zoom Marketplace";
+                                clicked => {
+                                    AppState.open-zoom-marketplace();
+                                }
+                            }
+                        }
+                    }
+                }
 
                 HorizontalLayout {
                     spacing: 14px;
@@ -540,6 +608,14 @@ component SettingsPage inherits Rectangle {
                         enabled: AppState.connection-state != 1;
                         clicked => {
                             AppState.test-connection();
+                        }
+                    }
+
+                    Btn {
+                        kind: 2;
+                        text: root.show-guide ? "Hide instructions" : "How do I get these keys?";
+                        clicked => {
+                            root.show-guide = !root.show-guide;
                         }
                     }
 
